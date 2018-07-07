@@ -29,7 +29,8 @@ def model(is_training_mode, images, labels, *args):
         filters=32,
         kernel_size=[5, 5],
         padding="same",
-        activation=tf.nn.relu)
+        activation=tf.nn.relu,
+        name='conv1')
 
     # Pooling Layer #1
     pool1 = tf.layers.max_pooling2d(inputs=conv1, pool_size=[2, 2], strides=2)
@@ -40,17 +41,18 @@ def model(is_training_mode, images, labels, *args):
         filters=64,
         kernel_size=[5, 5],
         padding="same",
-        activation=tf.nn.relu)
+        activation=tf.nn.relu,
+        name='conv2')
     pool2 = tf.layers.max_pooling2d(inputs=conv2, pool_size=[2, 2], strides=2)
 
     # Dense Layer
     pool2_flat = tf.reshape(pool2, [-1, 7 * 7 * 64])
-    dense = tf.layers.dense(inputs=pool2_flat, units=1024, activation=tf.nn.relu)
+    dense = tf.layers.dense(inputs=pool2_flat, units=1024, activation=tf.nn.relu, name='dense1')
     dropout = tf.layers.dropout(
         inputs=dense, rate=0.4, training=is_training_mode)
 
     # Logits Layer
-    logits = tf.layers.dense(inputs=dropout, units=10)
+    logits = tf.layers.dense(inputs=dropout, units=10, name='dense2')
 
     return logits, tf.argmax(input=logits, axis=1)
 
