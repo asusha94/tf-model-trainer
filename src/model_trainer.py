@@ -35,7 +35,8 @@ class Trainer:
                        allow_restoring=True,
                        dataset_enable_caching=False,
                        dataset_cache_dir_path=None,
-                       vars_moving_average_decay=0.9999):
+                       vars_moving_average_decay=0.9999,
+                       place_vars_on_cpu=False):
         self.n_training_steps = n_training_steps
         self.n_summary_steps = n_summary_steps
         self.n_dataset_workers = n_dataset_workers
@@ -59,6 +60,7 @@ class Trainer:
         self.dataset_needs_flatting = False
 
         self.vars_moving_average_decay = vars_moving_average_decay
+        self.place_vars_on_cpu = place_vars_on_cpu
 
         self._is_builded = False
         self.saver = None
@@ -229,7 +231,7 @@ class Trainer:
                         _train_loss, _train_summary = sess.run([self.loss, self.train_summary_op], {self.data_loader_mode: 'train-pipe'})
                         _valid_loss, _valid_summary = sess.run([self.loss, self.valid_summary_op], {self.data_loader_mode: 'valid-pipe'})
                         _train_summary_writer.add_summary(_train_summary, _step)
-                        _valid_summary_writer.add_summary(_valid_summary, _step)    
+                        _valid_summary_writer.add_summary(_valid_summary, _step)
                         
                         if verbose:
                             elapsed = time.time() - start
@@ -342,6 +344,11 @@ class Trainer:
         self._towers_outputs = []
         if len(self._gpus) > 1:
             with tf.variable_scope(tf.get_variable_scope()):
+                if self.place_vars_on_cpu:
+                    with tf.device('/cpu:0'):
+                        _ = self.model_getter(is_training_mode, *_batch)
+                        tf.get_variable_scope().reuse_variables()
+                        
                 _batch = list(zip(*tuple(tf.split(_batch[i], [self.batch_size]*len(self._gpus)) for i in range(len(_batch)))))
                 for i, name in enumerate(self._gpus):
                     with tf.device(name):
