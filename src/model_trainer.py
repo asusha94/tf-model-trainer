@@ -19,49 +19,48 @@ def get_available_gpus():
 
 
 class GpuParamServerDeviceSetter:
-  """Used with tf.device() to place variables on the least loaded GPU.
+    """Used with tf.device() to place variables on the least loaded GPU.
 
-    A common use for this class is to pass a list of GPU devices, e.g. ['gpu:0',
-    'gpu:1','gpu:2'], as ps_devices.  When each variable is placed, it will be
-    placed on the least loaded gpu. All other Ops, which will be the computation
-    Ops, will be placed on the worker_device.
-  """
-
-  def __init__(self, worker_device, ps_devices):
-    """Initializer for GpuParamServerDeviceSetter.
-    Args:
-      worker_device: the device to use for computation Ops.
-      ps_devices: a list of devices to use for Variable Ops. Each variable is
-      assigned to the least loaded device.
+      A common use for this class is to pass a list of GPU devices, e.g. ['gpu:0',
+      'gpu:1','gpu:2'], as ps_devices.  When each variable is placed, it will be
+      placed on the least loaded gpu. All other Ops, which will be the computation
+      Ops, will be placed on the worker_device.
     """
-    self.ps_devices = ps_devices
-    self.worker_device = worker_device
-    self.ps_sizes = [0] * len(self.ps_devices)
 
-  def __call__(self, op):
-    if op.device:
-      return op.device
-    if op.type not in ['Variable', 'VariableV2', 'VarHandleOp']:
-      return self.worker_device
+    def __init__(self, worker_device, ps_devices):
+        """Initializer for GpuParamServerDeviceSetter.
+        Args:
+        worker_device: the device to use for computation Ops.
+        ps_devices: a list of devices to use for Variable Ops. Each variable is
+        assigned to the least loaded device.
+        """
+        self.ps_devices = ps_devices
+        self.worker_device = worker_device
+        self.ps_sizes = [0] * len(self.ps_devices)
 
-    # Gets the least loaded ps_device
-    device_index, _ = min(enumerate(self.ps_sizes), key=operator.itemgetter(1))
-    device_name = self.ps_devices[device_index]
-    var_size = op.outputs[0].get_shape().num_elements()
-    self.ps_sizes[device_index] += var_size
+    def __call__(self, op):
+        if op.device:
+            return op.device
+        if op.type not in ['Variable', 'VariableV2', 'VarHandleOp']:
+            return self.worker_device
 
-    return device_name
+        # Gets the least loaded ps_device
+        device_index, _ = min(enumerate(self.ps_sizes), key=operator.itemgetter(1))
+        device_name = self.ps_devices[device_index]
+        var_size = op.outputs[0].get_shape().num_elements()
+        self.ps_sizes[device_index] += var_size
+
+        return device_name
 
 
 def _create_device_setter(is_cpu_ps, worker, gpus):
-  """Create device setter object."""
-  if is_cpu_ps:
-    # tf.train.replica_device_setter supports placing variables on the CPU, all
-    # on one GPU, or on ps_servers defined in a cluster_spec.
-    return tf.train.replica_device_setter(
-        worker_device=worker, ps_device='/cpu:0', ps_tasks=1)
-  else:
-    return GpuParamServerDeviceSetter(worker, gpus)
+    """Create device setter object."""
+    if is_cpu_ps:
+        # tf.train.replica_device_setter supports placing variables on the CPU, all
+        # on one GPU, or on ps_servers defined in a cluster_spec.
+        return tf.train.replica_device_setter(worker_device=worker, ps_device='/cpu:0', ps_tasks=1)
+    else:
+        return GpuParamServerDeviceSetter(worker, gpus)
 
 
 class Trainer:
