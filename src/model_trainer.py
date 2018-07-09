@@ -364,7 +364,7 @@ class Trainer:
         # dataset = dataset.map(lambda *sample: tuple(tf.reshape(item, shape) for item, shape in zip(sample, self.dataset_output_shapes)), DATASET_N_WORKERS)
         dataset = dataset.shuffle(buffer_size=BUFFER_SIZE)
         dataset = dataset.repeat()
-        dataset = dataset.batch(batch_size=BATCH_SIZE*N_TRAINERS)
+        dataset = dataset.batch(batch_size=BATCH_SIZE)
         dataset = dataset.prefetch(buffer_size=max(1, len(self._gpus)))
 
         self.pipe_name_tf_phr = pipe_name_tf_phr
@@ -375,31 +375,37 @@ class Trainer:
         self.train_iterator = dataset.make_initializable_iterator('train')
         self.valid_iterator = dataset.make_initializable_iterator('valid')
 
-        self.train_batch = self.train_iterator.get_next()
-        self.valid_batch = self.valid_iterator.get_next()
+        if len(self._gpus) > 1:
+            self.train_batch = [self.train_iterator.get_next() for i in range(len(self._gpus))]
+            self.valid_batch = [self.valid_iterator.get_next() for i in range(len(self._gpus))]
+        else:
+            self.train_batch = self.train_iterator.get_next()
+            self.valid_batch = self.valid_iterator.get_next()
 
     def _setup_model(self):
         with tf.name_scope('aux'):
             is_training_mode = tf.placeholder_with_default(False, [], name='is_training_mode')
             data_loader_mode = tf.placeholder_with_default('train-pipe', [], name='data_loader_mode')
-            
-            _batch = tf.case([(tf.equal(data_loader_mode, 'train-pipe'), lambda: self.train_batch),
-                              (tf.equal(data_loader_mode, 'valid-pipe'), lambda: self.valid_batch)],
-                             exclusive=True)
-            _batch = tuple(tf.reshape(_batch[i], [-1] + shape[1:].as_list()) for i, shape in enumerate(self.dataset.output_shapes))
         
         self._towers_outputs = []
         if len(self._gpus) > 1:
             with tf.variable_scope(tf.get_variable_scope()):
-                _batch = list(zip(*tuple(tf.split(_batch[i], [self.batch_size]*len(self._gpus)) for i in range(len(_batch)))))
                 for i, name in enumerate(self._gpus):
                     device_setter = _create_device_setter(self.place_vars_on_cpu, name, self._gpus)
                     with tf.device(device_setter):
                         with tf.name_scope('tower-%i' % i):
-                            outputs = self.model_getter(is_training_mode, *_batch[i])
-                            self._towers_outputs.append((name, outputs, _batch[i]))
+                            _batch = tf.case([(tf.equal(data_loader_mode, 'train-pipe'), lambda: self.train_batch[i]),
+                                            (tf.equal(data_loader_mode, 'valid-pipe'), lambda: self.valid_batch[i])],
+                                            exclusive=True)
+                            _batch = tuple(tf.reshape(_batch[i], [-1] + shape[1:].as_list()) for i, shape in enumerate(self.dataset.output_shapes))
+                            outputs = self.model_getter(is_training_mode, *_batch)
+                            self._towers_outputs.append((name, outputs, _batch))
                             tf.get_variable_scope().reuse_variables()
         else:
+            _batch = tf.case([(tf.equal(data_loader_mode, 'train-pipe'), lambda: self.train_batch),
+                              (tf.equal(data_loader_mode, 'valid-pipe'), lambda: self.valid_batch)],
+                             exclusive=True)
+            _batch = tuple(tf.reshape(_batch[i], [-1] + shape[1:].as_list()) for i, shape in enumerate(self.dataset.output_shapes))
             outputs = self.model_getter(is_training_mode, *_batch)
             self._towers_outputs.append((None, outputs, _batch))
 
