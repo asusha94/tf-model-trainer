@@ -2,6 +2,7 @@ import os
 import shutil
 import tensorflow as tf
 import time
+import operator
 from tensorflow.python.client import device_lib
 
 
@@ -60,7 +61,7 @@ def _create_device_setter(is_cpu_ps, worker, gpus):
     return tf.train.replica_device_setter(
         worker_device=worker, ps_device='/cpu:0', ps_tasks=1)
   else:
-    return ParamServerDeviceSetter(worker, gpus)
+    return GpuParamServerDeviceSetter(worker, gpus)
 
 
 class Trainer:
@@ -390,14 +391,9 @@ class Trainer:
         self._towers_outputs = []
         if len(self._gpus) > 1:
             with tf.variable_scope(tf.get_variable_scope()):
-                if self.place_vars_on_cpu:
-                    with tf.device('/cpu:0'):
-                        _ = self.model_getter(is_training_mode, *_batch)
-                        tf.get_variable_scope().reuse_variables()
-                        
                 _batch = list(zip(*tuple(tf.split(_batch[i], [self.batch_size]*len(self._gpus)) for i in range(len(_batch)))))
                 for i, name in enumerate(self._gpus):
-                    device_setter = _create_device_setter(False, name, self._gpus)
+                    device_setter = _create_device_setter(self.place_vars_on_cpu, name, self._gpus)
                     with tf.device(device_setter):
                         with tf.name_scope('tower-%i' % i):
                             outputs = self.model_getter(is_training_mode, *_batch[i])
@@ -417,7 +413,7 @@ class Trainer:
         with tf.name_scope('losses'):
             if len(self._towers_outputs) > 1:
                 for i, (name, outputs, batch) in enumerate(self._towers_outputs):
-                    device_setter = _create_device_setter(False, name, self._gpus)
+                    device_setter = _create_device_setter(self.place_vars_on_cpu, name, self._gpus)
                     with tf.device(device_setter):
                         with tf.name_scope('tower-%i' % i) as scope:
                             _ = self.loss_getter(*batch, *outputs)
@@ -472,7 +468,7 @@ class Trainer:
             towers_grads = []
             if len(self._towers_losses) > 1:
                 for i, (name, losses, reg_losses) in enumerate(self._towers_losses):
-                    device_setter = _create_device_setter(False, name, self._gpus)
+                    device_setter = _create_device_setter(self.place_vars_on_cpu, name, self._gpus)
                     with tf.device(device_setter):
                         with tf.name_scope('tower-%i' % i):
                             assert len(losses), 'Losses aren\'t provided'
@@ -526,7 +522,7 @@ class Trainer:
             metrics = []
             if len(self._towers_outputs) > 1:
                 for i, (name, outputs, batch) in enumerate(self._towers_outputs):
-                    device_setter = _create_device_setter(False, name, self._gpus)
+                    device_setter = _create_device_setter(self.place_vars_on_cpu, name, self._gpus)
                     with tf.device(device_setter):
                         with tf.name_scope('tower-%i' % i):
                             result = self.metrics_getter(*batch, *outputs)
