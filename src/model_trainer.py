@@ -531,19 +531,24 @@ class Trainer:
                     with tf.device(device_setter):
                         with tf.name_scope('tower-%i' % i):
                             result = self.metrics_getter(*batch, *outputs)
-                            if isinstance(result, (list, tuple)):
-                                metrics.append(result)
-                            else:
-                                metrics.append([result])
+                            if result is not None:
+                                if isinstance(result, (list, tuple)):
+                                    metrics.append(result)
+                                else:
+                                    metrics.append([result])
             else:
                 _, outputs, batch = self._towers_outputs[0]
                 result = self.metrics_getter(*batch, *outputs)
-                if isinstance(result, (list, tuple)):
-                    metrics.append(result)
-                else:
-                    metrics.append([result])
+                if result is not None:
+                    if isinstance(result, (list, tuple)):
+                        metrics.append(result)
+                    else:
+                        metrics.append([result])
 
             self._metrics = [tf.reduce_mean(m, axis=0) for m in zip(*metrics)]
 
     def _setup_summary(self):
-        self.train_summary_op, self.valid_summary_op = self.summary_getter(self._params_averages, self._grads, self._learning_rate, *self._metrics, *self._avg_losses)
+        if len(self._avg_losses) > 1:
+            self.train_summary_op, self.valid_summary_op = self.summary_getter(self._params_averages, self._grads, self._learning_rate, *self._metrics, self.loss, *self._avg_losses)
+        else:
+            self.train_summary_op, self.valid_summary_op = self.summary_getter(self._params_averages, self._grads, self._learning_rate, *self._metrics, self.loss)
