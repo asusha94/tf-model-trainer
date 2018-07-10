@@ -499,9 +499,18 @@ class Trainer:
             for grad_and_vars in zip(*towers_grads):
                 _grads = []
                 for g, _ in grad_and_vars:
+                    if g is None:
+                        skip = True
+                        break
+
                     expanded_g = tf.expand_dims(g, 0)
 
                     _grads.append(expanded_g)
+                else:
+                    skip = False
+
+                if skip:
+                    continue
 
                 grad = tf.concat(axis=0, values=_grads)
                 grad = tf.reduce_mean(grad, 0)
