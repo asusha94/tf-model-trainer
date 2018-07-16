@@ -9,8 +9,9 @@ from tensorflow.python.client import device_lib
 def add_grads_summary(grads):
     for grad, var in grads:
         if grad is not None:
-            tf.summary.scalar('gradients/' + var.op.name, tf.norm(grad))
-            tf.summary.histogram('gradients/' + var.op.name, grad)
+            grad_ = tf.boolean_mask(grad, tf.is_finite(grad))
+            tf.summary.scalar('gradients/' + var.op.name, tf.norm(grad_))
+            tf.summary.histogram('gradients/' + var.op.name, grad_)
 
 
 def get_available_gpus():
