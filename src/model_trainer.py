@@ -82,7 +82,6 @@ class Trainer:
                        allow_restoring=True,
                        dataset_enable_caching=False,
                        dataset_cache_dir_path=None,
-                       vars_moving_average_decay=0.9999,
                        place_vars_on_cpu=False):
         self.n_training_steps = n_training_steps
         self.n_summary_steps = n_summary_steps
@@ -106,13 +105,14 @@ class Trainer:
         self.dataset_cache_dir_path = dataset_cache_dir_path
         self.dataset_needs_flatting = False
 
-        self.vars_moving_average_decay = vars_moving_average_decay
         self.place_vars_on_cpu = place_vars_on_cpu
 
         self._is_builded = False
         self.saver = None
 
-    def set_inputs(self, dataset_placeholders_getter, dataset_mapper=None, flat_mapper=False):
+        self.datasets = []
+
+    def add_inputs(self, dataset_placeholders_getter, dataset_mapper=None, flat_mapper=False):
         '''
         Arguments
         ---------
@@ -133,11 +133,7 @@ class Trainer:
         if dataset_mapper is not None and not callable(dataset_mapper):
             raise ValueError('dataset_mapper: is not callable')
 
-        self.dataset_placeholders_getter = dataset_placeholders_getter
-        # self.dataset_output_dtypes = output_dtypes
-        # self.dataset_output_shapes = output_shapes
-        self.dataset_needs_flatting = flat_mapper
-        self.dataset_mapper = dataset_mapper
+        self.datasets.append((dataset_placeholders_getter, flat_mapper, dataset_mapper))
         
         self._is_builded = False
 
@@ -172,7 +168,7 @@ class Trainer:
 
         return self
     
-    def train(self, train_data_source, valid_data_source, model_initial_weights_loader=None, pre_start_hooks=[], pre_train_hooks=[], post_train_hooks=[], pre_end_hooks=[], verbose=False, training_dir_path=None):
+    def train(self, train_data_sources, valid_data_sources, model_initial_weights_loader=None, pre_start_hooks=[], pre_train_hooks=[], post_train_hooks=[], pre_end_hooks=[], verbose=False, training_dir_path=None):
         self._build_graph()
 
         TRAINING_DIR = self.training_dir_path
@@ -192,6 +188,16 @@ class Trainer:
 
         checkpoint_path = os.path.join(TRAINING_DIR, 'model.ckpt')
 
+        def setup_feed(data_sources, feed_dict):
+            if callable(data_sources):
+                feed_dict.update(data_sources(*self.datasets_placeholders))
+            elif isinstance(data_sources, (tuple, list)):
+                assert len(self.datasets_placeholders) == len(data_sources), 'Incorrect number of sources'
+                for placeholders, data_source in zip(self.datasets_placeholders, data_sources):
+                    feed_dict.update(data_source(*placeholders))
+            else:
+                raise ValueError('Unknown data source format')
+
         gpu_options = tf.GPUOptions(allow_growth=False, per_process_gpu_memory_fraction=GPU_MEMORY_FRACTION)
         with tf.Session(config=tf.ConfigProto(allow_soft_placement=True, gpu_options=gpu_options)) as sess:
             try:
@@ -202,14 +208,14 @@ class Trainer:
                 sess.run(tf.local_variables_initializer())
 
                 train_iter_feed_dict = dict()
-                train_iter_feed_dict.update(train_data_source(*self.dataset_placeholders))
+                setup_feed(train_data_sources, train_iter_feed_dict)
                 if self.pipe_name_tf_phr is not None:
                     train_iter_feed_dict[self.pipe_name_tf_phr] = 'train'
 
                 sess.run(self.train_iterator.initializer, train_iter_feed_dict)
 
                 valid_iter_feed_dict = dict()
-                valid_iter_feed_dict.update(valid_data_source(*self.dataset_placeholders))
+                setup_feed(valid_data_sources, valid_iter_feed_dict)
                 if self.pipe_name_tf_phr is not None:
                     valid_iter_feed_dict[self.pipe_name_tf_phr] = 'valid'
 
@@ -333,51 +339,67 @@ class Trainer:
             CACHE_DIR_PATH = self.dataset_cache_dir_path if self.dataset_cache_dir_path.endswith('/') else (self.dataset_cache_dir_path + '/')
         else:
             CACHE_DIR_PATH = None
-        NEEDS_FLATTING = self.dataset_needs_flatting
 
-        dataset_placeholders = self.dataset_placeholders_getter()
-        if not isinstance(dataset_placeholders, (tuple, list)):
-            raise ValueError('dataset_placeholders: is neither a tuple nor a list')
+        datasets = []
+        datasets_placeholders = []
+        for i, (dataset_placeholders_getter, dataset_needs_flatting, dataset_mapper) in enumerate(self.datasets):
+            dataset_placeholders = dataset_placeholders_getter()
+            if not isinstance(dataset_placeholders, (tuple, list)):
+                raise ValueError('dataset_placeholders: is neither a tuple nor a list')
 
-        if ENABLE_CACHING and CACHE_DIR_PATH is not None:
-            pipe_name_tf_phr = tf.placeholder(tf.string, name='pipe_name')
-        else:
-            pipe_name_tf_phr = None
-
-        dataset = tf.data.Dataset().from_tensor_slices(dataset_placeholders)
-
-        if self.dataset_mapper is not None:
-            dataset = dataset.map(self.dataset_mapper, DATASET_N_WORKERS)
-            dataset = dataset.apply(tf.contrib.data.ignore_errors())
-        
-        if ENABLE_CACHING:
-            if CACHE_DIR_PATH is not None:
-                if not os.path.exists(CACHE_DIR_PATH):
-                    os.makedirs(CACHE_DIR_PATH)
-                dataset = dataset.cache(tf.constant(CACHE_DIR_PATH) + pipe_name_tf_phr)
+            if ENABLE_CACHING and CACHE_DIR_PATH is not None:
+                pipe_name_tf_phr = tf.placeholder(tf.string, name='pipe_name')
             else:
-                dataset = dataset.cache()
-            
-        if NEEDS_FLATTING:
-            dataset = dataset.flat_map(lambda *samples: tf.data.Dataset.from_tensor_slices(samples))
+                pipe_name_tf_phr = None
 
-        # dataset = dataset.map(lambda *sample: tuple(tf.reshape(item, shape) for item, shape in zip(sample, self.dataset_output_shapes)), DATASET_N_WORKERS)
-        dataset = dataset.shuffle(buffer_size=BUFFER_SIZE)
-        dataset = dataset.repeat()
+            dataset = tf.data.Dataset().from_tensor_slices(dataset_placeholders)
+
+            if dataset_mapper is not None:
+                dataset = dataset.map(dataset_mapper, DATASET_N_WORKERS)
+                dataset = dataset.apply(tf.contrib.data.ignore_errors())
+            
+            if ENABLE_CACHING:
+                if CACHE_DIR_PATH is not None and pipe_name_tf_phr is not None:
+                    if not os.path.exists(CACHE_DIR_PATH):
+                        os.makedirs(CACHE_DIR_PATH)
+                    dataset = dataset.cache(tf.constant(CACHE_DIR_PATH + ('data-%i-' % i)) + pipe_name_tf_phr)
+                else:
+                    dataset = dataset.cache()
+                
+            if dataset_needs_flatting:
+                dataset = dataset.flat_map(lambda *samples: tf.data.Dataset.from_tensor_slices(samples))
+
+            # dataset = dataset.map(lambda *sample: tuple(tf.reshape(item, shape) for item, shape in zip(sample, self.dataset_output_shapes)), DATASET_N_WORKERS)
+            dataset = dataset.shuffle(buffer_size=BUFFER_SIZE)
+            dataset = dataset.repeat()
+
+            if len(datasets) > 0:
+                assert datasets[-1].output_shapes == dataset.output_shapes and datasets[-1].output_types == dataset.output_types,\
+                    'Datasets don\'t produce the same types of elements' 
+
+            datasets.append(dataset)
+            datasets_placeholders.append(dataset_placeholders)
+
+        if len(datasets) == 1:
+            dataset = datasets[0]
+        else:
+            dataset = tf.data.Dataset.from_tensor_slices(datasets)
+            dataset = dataset.interleave(lambda d: d, cycle_length=len(datasets), block_length=1)
+
         dataset = dataset.batch(batch_size=BATCH_SIZE)
-        dataset = dataset.prefetch(buffer_size=max(1, len(self._gpus)))
+        dataset = dataset.prefetch(buffer_size=N_TRAINERS)
 
         self.pipe_name_tf_phr = pipe_name_tf_phr
 
-        self.dataset_placeholders = dataset_placeholders
+        self.datasets_placeholders = datasets_placeholders
         self.dataset = dataset
 
         self.train_iterator = dataset.make_initializable_iterator('train')
         self.valid_iterator = dataset.make_initializable_iterator('valid')
 
-        if len(self._gpus) > 1:
-            self.train_batch = [self.train_iterator.get_next() for i in range(len(self._gpus))]
-            self.valid_batch = [self.valid_iterator.get_next() for i in range(len(self._gpus))]
+        if N_TRAINERS > 1:
+            self.train_batch = [self.train_iterator.get_next() for i in range(N_TRAINERS)]
+            self.valid_batch = [self.valid_iterator.get_next() for i in range(N_TRAINERS)]
         else:
             self.train_batch = self.train_iterator.get_next()
             self.valid_batch = self.valid_iterator.get_next()
@@ -400,6 +422,7 @@ class Trainer:
                             _batch = tuple(tf.reshape(_batch[i], [-1] + shape[1:].as_list()) for i, shape in enumerate(self.dataset.output_shapes))
                             outputs = self.model_getter(is_training_mode, *_batch)
                             self._towers_outputs.append((name, outputs, _batch))
+
                             tf.get_variable_scope().reuse_variables()
         else:
             _batch = tf.case([(tf.equal(data_loader_mode, 'train-pipe'), lambda: self.train_batch),
@@ -411,7 +434,13 @@ class Trainer:
 
         self.is_training_mode = is_training_mode
         self.data_loader_mode = data_loader_mode
-            
+
+    def _place_on_good_device(self, routine):
+        if self.place_vars_on_cpu:
+            with tf.device('/cpu:0'):
+                return routine()
+        else:
+            return routine()
 
     def _setup_loss(self):
         self._towers_losses = []
@@ -435,8 +464,11 @@ class Trainer:
                 self._towers_losses.append((None, losses, reg_losses))
                 avg_losses.append(losses)
 
-            self._avg_losses = [tf.reduce_mean(l, axis=0) for l in zip(*avg_losses)]
-            self.loss = tf.add_n(self._avg_losses)
+            def calc_loss():
+                self._avg_losses = [tf.reduce_mean(l, axis=0) for l in zip(*avg_losses)]
+                self.loss = tf.add_n(self._avg_losses)
+
+            self._place_on_good_device(calc_loss)
 
     def _setup_train_op(self):
         LEARNING_RATE = self.learning_rate
@@ -444,7 +476,6 @@ class Trainer:
         LEARNING_RATE_DECAY_STAIRCASE = self.learning_rate_decay_staircase
         LEARNING_RATE_DECAY_STEPS = self.n_learning_rate_decay_steps
         GRAD_CLIP_VALUE = self.grad_clip_value
-        MOVING_AVERAGE_DECAY = self.vars_moving_average_decay
 
         _params = tf.trainable_variables()
 
@@ -452,24 +483,29 @@ class Trainer:
 
         self._step_var = step_var
         self._step_inc_op = step_var.assign(step_var + 1)
+
+        update_ops = []
         
         if callable(self.model_exclude_params):
             _excludes = self.model_exclude_params()
             if _excludes:
                 _params = list(filter(lambda x: any([item not in x.name for item in _excludes]), _params))
 
-        update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS)
-
         with tf.name_scope('optimizer'):
             with tf.name_scope('params'):
-                lr_var = tf.Variable(LEARNING_RATE, trainable=False)
-                
-                if LEARNING_RATE_DECAY and LEARNING_RATE_DECAY_STEPS:
-                    lr_var = tf.train.exponential_decay(lr_var, step_var, LEARNING_RATE_DECAY_STEPS, LEARNING_RATE_DECAY, staircase=LEARNING_RATE_DECAY_STAIRCASE)
+                def create_params():
+                    lr_var = tf.Variable(LEARNING_RATE, trainable=False)
+                    
+                    if LEARNING_RATE_DECAY and LEARNING_RATE_DECAY_STEPS:
+                        lr_var = tf.train.exponential_decay(lr_var, step_var, LEARNING_RATE_DECAY_STEPS, LEARNING_RATE_DECAY, staircase=LEARNING_RATE_DECAY_STAIRCASE)
+
+                    return lr_var
+
+                lr_var = self._place_on_good_device(create_params)
 
             self._learning_rate = lr_var
 
-            _optimizer = tf.train.AdamOptimizer(lr_var)
+            _optimizer = self._place_on_good_device(lambda: tf.train.AdamOptimizer(lr_var))
 
             towers_grads = []
             if len(self._towers_losses) > 1:
@@ -485,6 +521,9 @@ class Trainer:
 
                             grads = _optimizer.compute_gradients(loss)
                             towers_grads.append(grads)
+
+                            if i == 0:
+                                update_ops.append(tf.get_collection(tf.GraphKeys.UPDATE_OPS))
             else:
                 _, losses, reg_losses = self._towers_losses[0]
                 assert len(losses), 'Losses aren\'t provided'
@@ -496,41 +535,45 @@ class Trainer:
                 grads = _optimizer.compute_gradients(loss)
                 towers_grads.append(grads)
 
-            grads = []
-            for grad_and_vars in zip(*towers_grads):
-                _grads = []
-                for g, _ in grad_and_vars:
-                    if g is None:
-                        skip = True
-                        break
+                update_ops.append(tf.get_collection(tf.GraphKeys.UPDATE_OPS))
 
-                    expanded_g = tf.expand_dims(g, 0)
+            def get_apply_grads_op():
+                grads = []
+                for grad_and_vars in zip(*towers_grads):
+                    _grads = []
+                    for g, _ in grad_and_vars:
+                        if g is None:
+                            skip = True
+                            break
 
-                    _grads.append(expanded_g)
-                else:
-                    skip = False
+                        expanded_g = tf.expand_dims(g, 0)
 
-                if skip:
-                    continue
+                        _grads.append(expanded_g)
+                    else:
+                        skip = False
 
-                grad = tf.concat(axis=0, values=_grads)
-                grad = tf.reduce_mean(grad, 0)
+                    if skip:
+                        continue
 
-                v = grad_and_vars[0][1]
-                grad_and_var = (grad, v)
-                grads.append(grad_and_var)
+                    grad = tf.concat(axis=0, values=_grads)
+                    grad = tf.reduce_mean(grad, 0)
 
-            if GRAD_CLIP_VALUE is not None:
-                grads = [(tf.clip_by_norm(grad, GRAD_CLIP_VALUE), var) for grad, var in grads]
+                    v = grad_and_vars[0][1]
+                    grad_and_var = (grad, v)
+                    grads.append(grad_and_var)
 
-            apply_gradient_op = _optimizer.apply_gradients(grads)
-            
-            params_averages = tf.train.ExponentialMovingAverage(MOVING_AVERAGE_DECAY, step_var)
-            params_averages_op = params_averages.apply(_params)
+                if GRAD_CLIP_VALUE is not None:
+                    grads = [(tf.clip_by_norm(grad, GRAD_CLIP_VALUE), var) for grad, var in grads]
+
+                apply_gradient_op = _optimizer.apply_gradients(grads)
+
+                return apply_gradient_op
+
+            apply_gradient_op = self._place_on_good_device(get_apply_grads_op)
 
             self._grads = grads
-            self._params_averages = params_averages
-            self.train_op = tf.group(apply_gradient_op, params_averages_op, update_ops)
+            self._params = _params
+            self.train_op = tf.group(apply_gradient_op, *update_ops)
 
     def _setup_metrics(self):
         with tf.name_scope('metrics'):
@@ -559,6 +602,6 @@ class Trainer:
 
     def _setup_summary(self):
         if len(self._avg_losses) > 1:
-            self.train_summary_op, self.valid_summary_op = self.summary_getter(self._params_averages, self._grads, self._learning_rate, *self._metrics, self.loss, *self._avg_losses)
+            self.train_summary_op, self.valid_summary_op = self.summary_getter(self._params, self._grads, self._learning_rate, *self._metrics, self.loss, *self._avg_losses)
         else:
-            self.train_summary_op, self.valid_summary_op = self.summary_getter(self._params_averages, self._grads, self._learning_rate, *self._metrics, self.loss)
+            self.train_summary_op, self.valid_summary_op = self.summary_getter(self._params, self._grads, self._learning_rate, *self._metrics, self.loss)

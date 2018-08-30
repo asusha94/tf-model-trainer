@@ -84,12 +84,12 @@ trainer_options = dict(
 )
 
 Trainer(**trainer_options) \
-    .set_inputs(lambda: (tf.placeholder(tf.float32, [None, 784], "images"),
+    .add_inputs(lambda: (tf.placeholder(tf.float32, [None, 784], "images"),
                          tf.placeholder(tf.int32, [None], "labels"))) \
     .set_model(model) \
     .set_loss(loss) \
     .set_metrics(metrics) \
     .set_summary(summary) \
-    .train(train_data_source=lambda inp, lbl: {inp: mnist.train.images, lbl: mnist.train.labels},
-           valid_data_source=lambda inp, lbl: {inp: mnist.validation.images, lbl: mnist.validation.labels},
+    .train(train_data_sources=[lambda inp, lbl: {inp: mnist.train.images, lbl: mnist.train.labels}],
+           valid_data_sources=[lambda inp, lbl: {inp: mnist.validation.images, lbl: mnist.validation.labels}],
            verbose=True)
