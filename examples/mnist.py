@@ -62,13 +62,13 @@ def loss(images, labels, logits, *args):
 
 
 def metrics(images, labels, logits, classes):
-    return tf.reduce_mean(tf.cast(tf.equal(labels, tf.cast(classes, tf.int32)), tf.float32))
+#     return tf.reduce_mean(tf.cast(tf.equal(labels, tf.cast(classes, tf.int32)), tf.float32))
+    pass
 
 
-def summary(params, grads, learning_rate, accuracy, loss, *args):
+def summary(params, grads, learning_rate, loss, *args):
     tf.summary.scalar('learning-rate', learning_rate)
     tf.summary.scalar('loss', loss)
-    tf.summary.scalar('accuracy', accuracy)
 
     valid_summary_op = tf.summary.merge_all()
 
@@ -80,7 +80,9 @@ def summary(params, grads, learning_rate, accuracy, loss, *args):
 
 trainer_options = dict(
     n_training_steps=100000,
-    training_dir_path='./training/mnist'
+    training_dir_path='./training/mnist',
+    place_vars_on_cpu=True,
+    batch_size=128
 )
 
 Trainer(**trainer_options) \
