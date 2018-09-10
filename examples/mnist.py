@@ -13,6 +13,7 @@ except ModuleNotFoundError:
     model_trainer = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(model_trainer)
     
+    ModelBuilder = model_trainer.ModelBuilder
     Trainer = model_trainer.Trainer
     add_grads_summary = model_trainer.add_grads_summary
 
@@ -20,7 +21,7 @@ except ModuleNotFoundError:
 mnist = input_data.read_data_sets("training/data/mnist/", one_hot=False)
 
 
-def model(is_training_mode, images, labels, *args):
+def model(is_training_mode, images, labels):
     input_layer = tf.reshape(images, [-1, 28, 28, 1])
 
     # Convolutional Layer #1
@@ -57,7 +58,7 @@ def model(is_training_mode, images, labels, *args):
     return logits, tf.argmax(input=logits, axis=1)
 
 
-def loss(images, labels, logits, *args):
+def loss(images, labels, logits, classes):
     return tf.losses.sparse_softmax_cross_entropy(labels=labels, logits=logits)
 
 
@@ -66,7 +67,7 @@ def metrics(images, labels, logits, classes):
     pass
 
 
-def summary(params, grads, learning_rate, loss, *args):
+def summary(step, learning_rate, grads, loss, avg_losses, metrics):
     tf.summary.scalar('learning-rate', learning_rate)
     tf.summary.scalar('loss', loss)
 
@@ -78,20 +79,25 @@ def summary(params, grads, learning_rate, loss, *args):
 
     return train_summary_op, valid_summary_op
 
+
+model = ModelBuilder() \
+    .set_model(model) \
+    .set_loss(loss)
+
 trainer_options = dict(
     n_training_steps=100000,
     training_dir_path='./training/mnist',
-    place_vars_on_cpu=True,
+    place_vars_on_cpu=False,
     batch_size=128
 )
 
-Trainer(**trainer_options) \
-    .add_inputs(lambda: (tf.placeholder(tf.float32, [None, 784], "images"),
-                         tf.placeholder(tf.int32, [None], "labels"))) \
-    .set_model(model) \
-    .set_loss(loss) \
-    .set_metrics(metrics) \
-    .set_summary(summary) \
-    .train(train_data_sources=[lambda inp, lbl: {inp: mnist.train.images, lbl: mnist.train.labels}],
-           valid_data_sources=[lambda inp, lbl: {inp: mnist.validation.images, lbl: mnist.validation.labels}],
-           verbose=True)
+if __name__ == '__main__':
+    Trainer(**trainer_options) \
+        .add_inputs(lambda: (tf.placeholder(tf.float32, [None, 784], "images"),
+                             tf.placeholder(tf.int32, [None], "labels"))) \
+        .set_model(model) \
+        .set_metrics(metrics) \
+        .set_summary(summary) \
+        .train(train_data_sources=[lambda inp, lbl: {inp: mnist.train.images, lbl: mnist.train.labels}],
+            valid_data_sources=[lambda inp, lbl: {inp: mnist.validation.images, lbl: mnist.validation.labels}],
+            verbose=True)
