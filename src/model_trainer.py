@@ -149,7 +149,8 @@ class Trainer:
                        dataset_enable_caching=False,
                        dataset_cache_dir_path=None,
                        place_vars_on_cpu=False,
-                       use_gready_placement_startegy=False):
+                       use_gready_placement_startegy=False,
+                       grads_sync_steps=1):
         self.n_training_steps = n_training_steps
         self.n_summary_steps = n_summary_steps
         self.n_dataset_workers = n_dataset_workers
@@ -174,6 +175,8 @@ class Trainer:
 
         self.place_vars_on_cpu = place_vars_on_cpu
         self.use_gready_placement_startegy = use_gready_placement_startegy
+        
+        self.grads_sync_steps = max(1, grads_sync_steps)
 
         self._is_builded = False
         self.saver = None
@@ -248,7 +251,8 @@ class Trainer:
 
         return self
     
-    def train(self, train_data_sources, valid_data_sources, model_initial_weights_loader=None, pre_start_hooks=[], pre_train_hooks=[], post_train_hooks=[], pre_end_hooks=[], verbose=False, training_dir_path=None):
+    def train(self, train_data_sources, valid_data_sources, model_initial_weights_loader=None,
+              pre_start_hooks=[], pre_train_hooks=[], post_train_hooks=[], pre_end_hooks=[], verbose=False, training_dir_path=None):
         self._build_graph()
 
         TRAINING_DIR = self.training_dir_path
@@ -330,12 +334,10 @@ class Trainer:
             try:
                 _step = int(sess.run(self._step_var))
                 if _step == 0:
-                    _train_loss, _train_summary = sess.run([self.loss, self.train_summary_op], {self.data_loader_mode: 'train-pipe'})
-                    _valid_loss, _valid_summary = sess.run([self.loss, self.valid_summary_op], {self.data_loader_mode: 'valid-pipe'})
+                    _train_loss, _train_summary = sess.run([self.total_loss, self.train_summary_op], {self.data_loader_mode: 'train-pipe'})
+                    _valid_loss, _valid_summary = sess.run([self.total_loss, self.valid_summary_op], {self.data_loader_mode: 'valid-pipe'})
                     _train_summary_writer.add_summary(_train_summary, _step)
                     _valid_summary_writer.add_summary(_valid_summary, _step)
-                    
-                    _step = int(sess.run(self._step_inc_op))
 
                     if verbose:
                         print('Initial train loss = %.6f, valid loss = %.6f.' % (_train_loss, _valid_loss), flush=True)
@@ -347,15 +349,15 @@ class Trainer:
                     start = time.time()
                     
                 for _ in range(_step, TRAINING_STEPS):
-                    _step = int(sess.run(self._step_var))
-
                     if pre_train_hooks:
                         for item in pre_train_hooks:
                             if callable(item):
                                 item(sess, _step)
 
                     run_metadata = tf.RunMetadata()
-                    sess.run([self.train_op], {self.is_training_mode: True, self.data_loader_mode: 'train-pipe'}, run_metadata=run_metadata)
+                    sess.run(self.train_op, {self.is_training_mode: True, self.data_loader_mode: 'train-pipe'}, run_metadata=run_metadata)
+                    
+                    _step = int(sess.run(self._step_var))
 
                     if post_train_hooks:
                         for item in post_train_hooks:
@@ -363,8 +365,8 @@ class Trainer:
                                 item(sess, _step)
                     
                     if _step % STEPS_PER_SUMMARY == 0:
-                        _train_loss, _train_summary = sess.run([self.loss, self.train_summary_op], {self.data_loader_mode: 'train-pipe'})
-                        _valid_loss, _valid_summary = sess.run([self.loss, self.valid_summary_op], {self.data_loader_mode: 'valid-pipe'})
+                        _train_loss, _train_summary = sess.run([self.total_loss, self.train_summary_op], {self.data_loader_mode: 'train-pipe'})
+                        _valid_loss, _valid_summary = sess.run([self.total_loss, self.valid_summary_op], {self.data_loader_mode: 'valid-pipe'})
                         _train_summary_writer.add_summary(_train_summary, _step)
                         _train_summary_writer.add_run_metadata(run_metadata, 'train-op-%i' % _step, _step)
                         _valid_summary_writer.add_summary(_valid_summary, _step)
@@ -481,7 +483,7 @@ class Trainer:
             dataset = dataset.interleave(lambda d: d, cycle_length=len(datasets), block_length=1)
 
         dataset = dataset.batch(batch_size=self.batch_size)
-        dataset = dataset.prefetch(buffer_size=N_TRAINERS)
+        dataset = dataset.prefetch(buffer_size=N_TRAINERS*(self.grads_sync_steps if N_TRAINERS > 1 else 1))
 
         self.pipe_name_tf_phr = pipe_name_tf_phr
 
@@ -510,7 +512,7 @@ class Trainer:
         self._towers_losses = []
         self._towers_grads = []
 
-        def build_model(scope):
+        def build_model(scope, grads_factor=1.):
             _batch = tf.case([(tf.equal(self.data_loader_mode, 'train-pipe'), lambda: self.train_batch()),
                               (tf.equal(self.data_loader_mode, 'valid-pipe'), lambda: self.valid_batch())],
                              exclusive=True)
@@ -522,47 +524,87 @@ class Trainer:
                 if not isinstance(outputs, (tuple, list)):
                     outputs = [outputs]
 
-                self._towers_outputs.append((outputs, _batch))
-
                 losses, reg_losses = self.model.loss(scope)
-                self._towers_losses.append((losses, reg_losses))
                     
                 gradvars = self.model.gradients()
                 
                 if self.grad_clip_value is not None:
-                    gradvars = [(tf.clip_by_norm(grad, self.grad_clip_value), var) for grad, var in gradvars]
+                    with tf.name_scope('grads-clipping'):
+                        grad_clip_value = tf.constant(self.grad_clip_value, dtype=tf.float32)
+                        gradvars = [(tf.clip_by_norm(grad, grad_clip_value), var) for grad, var in gradvars]
 
-                self._towers_grads.append(gradvars)
+                if len(self._gpus) > 1:
+                    with tf.name_scope('grads-division-for-avg'):
+                        multiplier = tf.constant(grads_factor / len(self._gpus), dtype=tf.float32)
+                        gradvars = [((tf.multiply(grad, multiplier) if grad is not None else grad), var) for grad, var in gradvars]
 
-                return losses
+                return (outputs, _batch), (losses, reg_losses), gradvars
 
         if len(self._gpus) > 1:
-            avg_losses = []
             for i, name in enumerate(self._gpus):
-                with tf.variable_scope(parent_scope, reuse=bool(i != 0)):
-                    with tf.device(self._get_device_setter(name)):
-                        scope = tf.name_scope('tower-%i' % i)
+                with tf.device(self._get_device_setter(name)):
+                    result_set = []
+                    for s in range(self.grads_sync_steps):
+                        with tf.variable_scope(parent_scope, reuse=tf.AUTO_REUSE):
+                            if self.grads_sync_steps == 1:
+                                scope = tf.name_scope('tower-%i' % i)
+                            else:
+                                scope = tf.name_scope('tower-%i-%i' % (i, s))
 
-                        losses = build_model(scope)
+                            result = build_model(scope, grads_factor=1./self.grads_sync_steps)
 
-                        avg_losses.append([tf.multiply(loss, 1. / len(self._gpus)) for loss in losses])
+                            result_set.append(result)
 
-                        if i == 0:
-                            self._update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS, scope=scope.name)
+                    if len(result_set) == 1:
+                        (outputs, _batch), (losses, reg_losses), gradvars = result_set[0]
+                    else:
+                        data, losses, gradvars = zip(*result_set)
 
-            self._avg_losses = [tf.reduce_sum(l, axis=0) for l in zip(*avg_losses)]
+                        outputs, _batch = data[0]
+                        losses, reg_losses = losses[0]
+
+                        with tf.name_scope('gradient-summing'):
+                            all_grads = {}
+                            for grad, var in itertools.chain(*gradvars):
+                                if grad is not None:
+                                    all_grads.setdefault(var, []).append(grad)
+
+                            gradvars = []
+                            for var, grads in all_grads.items():
+                                if len(grads) == 1:
+                                    avg_grad = grads[0]
+                                else:
+                                    avg_grad = tf.add_n(grads)
+                                gradvars.append((avg_grad, var))
+
+                    self._towers_outputs.append((outputs, _batch))
+                    self._towers_losses.append((losses, reg_losses))
+
+                    self._towers_grads.append(gradvars)
+
+                    if i == 0:
+                        self._update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS, scope=parent_scope)
+                        self._losses = losses
         else:
             with tf.variable_scope(parent_scope):
-                self._avg_losses = build_model(tf.name_scope(parent_scope))
-                self._update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS, scope=parent_scope)
+                if len(self._gpus):
+                    with tf.device(self._get_device_setter(self._gpus[0])):
+                        (outputs, _batch), (losses, reg_losses), gradvars = build_model(tf.name_scope(parent_scope))
+                else:
+                    (outputs, _batch), (losses, reg_losses), gradvars = build_model(tf.name_scope(parent_scope))
+                
+                self._towers_outputs.append((outputs, _batch))
+                self._towers_losses.append((losses, reg_losses))
 
-        self.loss = tf.add_n(self._avg_losses)
+                self._towers_grads.append(gradvars)
+                
+                self._update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS, scope=parent_scope)
+                self._losses = losses
+
+        self.total_loss = tf.add_n(self._losses)
 
     def _setup_train_op(self):
         step_var = tf.Variable(0, trainable=False)
-
-        self._step_var = step_var
-        self._step_inc_op = step_var.assign(step_var + 1)
 
         with tf.name_scope('optimizer'):
             with tf.name_scope('params'):
@@ -573,12 +615,16 @@ class Trainer:
                         lr_var, step_var, self.n_learning_rate_decay_steps, self.learning_rate_decay,
                         staircase=self.learning_rate_decay_staircase)
 
-            self._learning_rate = lr_var
+            if len(self._gpus) > 1:
+                n_steps = self.grads_sync_steps
+            else:
+                n_steps = 1
+                
+            self._learning_rate = lr_var * n_steps
 
             _optimizer = tf.train.AdamOptimizer(lr_var)
         
-        with tf.name_scope('training'):
-            with tf.name_scope('gradient_summing'):
+            with tf.name_scope('gradient-summing'):
                 all_grads = {}
                 for grad, var in itertools.chain(*self._towers_grads):
                     if grad is not None:
@@ -597,6 +643,7 @@ class Trainer:
 
             self._grads = gradvars
             self.train_op = apply_gradient_op
+            self._step_var = step_var * n_steps
 
             if self._update_ops:         
                 self.train_op = tf.group(self.train_op, *self._update_ops)
@@ -611,7 +658,7 @@ class Trainer:
 
     def _setup_summary(self):
         ops = self.summary_getter(
-            self._step_var, self._learning_rate, self._grads, self.loss, self._avg_losses, self._metrics)
+            self._step_var, self._learning_rate, self._grads, self.total_loss, self._losses, self._metrics)
         self.train_summary_op, self.valid_summary_op = ops
 
         

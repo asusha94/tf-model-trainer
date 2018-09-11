@@ -114,7 +114,7 @@ def metrics(images, labels, logits):
     pass
 
 
-def summary(step, learning_rate, grads, loss, avg_losses, metrics):
+def summary(step, learning_rate, grads, loss, losses, metrics):
     tf.summary.scalar('learning-rate', learning_rate)
     tf.summary.scalar('loss', loss)
 
@@ -127,6 +127,9 @@ def summary(step, learning_rate, grads, loss, avg_losses, metrics):
     return train_summary_op, valid_summary_op
 
 
+tf.set_random_seed(42)
+
+
 (x_train, y_train), (x_test, y_test) = cifar10.load_data()
 
 
@@ -136,9 +139,11 @@ model = ModelBuilder() \
 
 trainer_options = dict(
     n_training_steps=100000,
-    training_dir_path='./training/cifar10-gpu1',
-    place_vars_on_cpu=False,
-    batch_size=96
+    training_dir_path='./training/cifar10',
+    place_vars_on_cpu=True,
+    batch_size=96,
+    buffer_size=96*4,
+    grads_sync_steps=2
 )
 
 if __name__ == '__main__':
