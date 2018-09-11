@@ -89,12 +89,11 @@ class ModelBuilder:
             def forward(self, is_training_mode, *inputs):
                 self.inputs = inputs
                 
-                exclude_params = [param.name for param in tf.trainable_variables()]
-                
                 self.outputs = self._model_fn(is_training_mode, *self.inputs)
+                if not isinstance(self.outputs, (tuple, list)):
+                    self.outputs = [self.outputs]
+                    
                 params = tf.trainable_variables()
-
-                params = [param for param in params if param.name not in exclude_params]
 
                 if callable(self._exclude_params):
                     exclude_params = self._exclude_params()
@@ -407,12 +406,12 @@ class Trainer:
 
                 with tf.name_scope('training'):
                     self._setup_train_op()
+                    
+                    self.saver = tf.train.Saver(tf.global_variables())
 
                     self._setup_metrics()
-
-                    self._setup_summary()
-
-                    self.saver = tf.train.Saver(tf.global_variables())
+                    
+                self._setup_summary()
                 
                 self._init_globals_op = tf.global_variables_initializer()
                 self._init_locals_op = tf.local_variables_initializer()
@@ -422,15 +421,13 @@ class Trainer:
             if self.place_vars_on_cpu:
                 with tf.device('/cpu:0'):
                     return build()
+            elif self._gpus:
+                with tf.device(self._gpus[0]):
+                    return build()
             else:
                 return build()
 
     def _setup_dataset(self):
-        BATCH_SIZE = self.batch_size
-        BUFFER_SIZE = self.buffer_size
-        DATASET_N_WORKERS = self.n_dataset_workers
-        ENABLE_CACHING = self.dataset_enable_caching
-
         N_TRAINERS = max(1, len(self._gpus))
 
         if self.dataset_cache_dir_path:
@@ -445,7 +442,7 @@ class Trainer:
             if not isinstance(dataset_placeholders, (tuple, list)):
                 raise ValueError('dataset_placeholders: is neither a tuple nor a list')
 
-            if ENABLE_CACHING and CACHE_DIR_PATH is not None:
+            if self.dataset_enable_caching and CACHE_DIR_PATH is not None:
                 pipe_name_tf_phr = tf.placeholder(tf.string, name='pipe_name')
             else:
                 pipe_name_tf_phr = None
@@ -453,10 +450,10 @@ class Trainer:
             dataset = tf.data.Dataset().from_tensor_slices(dataset_placeholders)
 
             if dataset_mapper is not None:
-                dataset = dataset.map(dataset_mapper, DATASET_N_WORKERS)
+                dataset = dataset.map(dataset_mapper, self.n_dataset_workers)
                 dataset = dataset.apply(tf.contrib.data.ignore_errors())
 
-            if ENABLE_CACHING:
+            if self.dataset_enable_caching:
                 if CACHE_DIR_PATH is not None and pipe_name_tf_phr is not None:
                     if not os.path.exists(CACHE_DIR_PATH):
                         os.makedirs(CACHE_DIR_PATH)
@@ -467,7 +464,7 @@ class Trainer:
             if dataset_needs_flatting:
                 dataset = dataset.flat_map(lambda *samples: tf.data.Dataset.from_tensor_slices(samples))
 
-            dataset = dataset.shuffle(buffer_size=BUFFER_SIZE)
+            dataset = dataset.shuffle(buffer_size=self.buffer_size)
             dataset = dataset.repeat()
 
             if len(datasets) > 0:
@@ -483,7 +480,7 @@ class Trainer:
             dataset = tf.data.Dataset.from_tensor_slices(datasets)
             dataset = dataset.interleave(lambda d: d, cycle_length=len(datasets), block_length=1)
 
-        dataset = dataset.batch(batch_size=BATCH_SIZE)
+        dataset = dataset.batch(batch_size=self.batch_size)
         dataset = dataset.prefetch(buffer_size=N_TRAINERS)
 
         self.pipe_name_tf_phr = pipe_name_tf_phr
@@ -522,6 +519,8 @@ class Trainer:
 
             with scope as scope:
                 outputs = self.model.forward(self.is_training_mode, *_batch)
+                if not isinstance(outputs, (tuple, list)):
+                    outputs = [outputs]
 
                 self._towers_outputs.append((outputs, _batch))
 
@@ -539,8 +538,8 @@ class Trainer:
 
         if len(self._gpus) > 1:
             avg_losses = []
-            with tf.variable_scope(tf.get_variable_scope()):
-                for i, name in enumerate(self._gpus):
+            for i, name in enumerate(self._gpus):
+                with tf.variable_scope(parent_scope, reuse=bool(i != 0)):
                     with tf.device(self._get_device_setter(name)):
                         scope = tf.name_scope('tower-%i' % i)
 
@@ -549,13 +548,13 @@ class Trainer:
                         avg_losses.append([tf.multiply(loss, 1. / len(self._gpus)) for loss in losses])
 
                         if i == 0:
-                            self._update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS, scope=scope)
+                            self._update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS, scope=scope.name)
 
-                        tf.get_variable_scope().reuse_variables()
             self._avg_losses = [tf.reduce_sum(l, axis=0) for l in zip(*avg_losses)]
         else:
-            self._avg_losses = build_model(tf.name_scope(parent_scope))
-            self._update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS, scope=parent_scope)
+            with tf.variable_scope(parent_scope):
+                self._avg_losses = build_model(tf.name_scope(parent_scope))
+                self._update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS, scope=parent_scope)
 
         self.loss = tf.add_n(self._avg_losses)
 
