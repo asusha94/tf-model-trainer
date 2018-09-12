@@ -531,7 +531,7 @@ class Trainer:
                 if self.grad_clip_value is not None:
                     with tf.name_scope('grads-clipping'):
                         grad_clip_value = tf.constant(self.grad_clip_value, dtype=tf.float32)
-                        gradvars = [(tf.clip_by_norm(grad, grad_clip_value), var) for grad, var in gradvars]
+                        gradvars = [((tf.clip_by_norm(grad, grad_clip_value) if grad is not None else grad), var) for grad, var in gradvars]
 
                 if len(self._gpus) > 1:
                     with tf.name_scope('grads-division-for-avg'):
