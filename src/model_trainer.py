@@ -541,11 +541,12 @@ class Trainer:
                 return (outputs, _batch), (losses, reg_losses), gradvars
 
         if len(self._gpus) > 1:
+            var_scope = tf.get_variable_scope()
             for i, name in enumerate(self._gpus):
                 with tf.device(self._get_device_setter(name)):
                     result_set = []
                     for s in range(self.grads_sync_steps):
-                        with tf.variable_scope(parent_scope, reuse=tf.AUTO_REUSE):
+                        with tf.variable_scope(var_scope, reuse=tf.AUTO_REUSE):
                             if self.grads_sync_steps == 1:
                                 scope = tf.name_scope('tower-%i' % i)
                             else:
@@ -590,7 +591,7 @@ class Trainer:
                         self._update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS, scope=parent_scope)
                         self._losses = losses
         else:
-            with tf.variable_scope(parent_scope):
+            with tf.variable_scope(var_scope):
                 if len(self._gpus):
                     with tf.device(self._get_device_setter(self._gpus[0])):
                         (outputs, _batch), (losses, reg_losses), gradvars = build_model(tf.name_scope(parent_scope))
