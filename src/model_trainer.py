@@ -498,7 +498,7 @@ class Trainer:
 
     def _get_device_setter(self, name):
         if self.place_vars_on_cpu:
-            return local_device_setter( worker_device=name)
+            return local_device_setter(worker_device=name)
         else:
             return local_device_setter(
                 ps_device_type='gpu',
@@ -575,6 +575,10 @@ class Trainer:
                                     avg_grad = grads[0]
                                 else:
                                     avg_grad = tf.add_n(grads)
+                                
+                                with tf.device(var.device):
+                                    avg_grad = tf.identity(avg_grad)
+                                        
                                 gradvars.append((avg_grad, var))
 
                     self._towers_outputs.append((outputs, _batch))
@@ -634,7 +638,7 @@ class Trainer:
                 for var, grads in all_grads.items():
                     with tf.device(var.device):
                         if len(grads) == 1:
-                            avg_grad = grads[0]
+                            avg_grad = tf.identity(grads[0])
                         else:
                             avg_grad = tf.add_n(grads)
                     gradvars.append((avg_grad, var))
