@@ -318,6 +318,8 @@ class Trainer:
 
             if model_initial_weights_loader is not None:
                 model_initial_weights_loader(sess)
+            elif hasattr(self.model, 'preload_weights_op') and callable(self.model.preload_weights_op):
+                self._model.preload_weights_op()(sess)
                     
             ckpt = tf.train.get_checkpoint_state(TRAINING_DIR)
             if ALLOW_RESTORING and ckpt and tf.train.checkpoint_exists(ckpt.model_checkpoint_path):
@@ -385,6 +387,56 @@ class Trainer:
                 self.saver.save(sess, checkpoint_path, global_step=_step)
                 tf.train.write_graph(sess.graph_def, TRAINING_DIR, 'graph.pb', as_text=False)
 
+    def freeze(self, input_getter, outputs_names=None, training_dir_path=None, ckpt_path=None):
+        if not input_getter:
+            raise ValueError('input_getter: is empty')
+            
+        if not callable(input_getter)
+            raise ValueError('input_getter: is not callable')
+            
+        if not outputs_names:
+            raise ValueError('outputs_names: is empty')
+            
+        if training_dir_path is Nont:
+            training_dir_path = self.training_dir_path
+            
+        if ckpt_path is None:
+            ckpt_path = os.path.join(training_dir_path, 'model.ckpt')
+        
+        ckpt = tf.train.get_checkpoint_state(ckpt_path)
+        if not ckpt or not tf.train.checkpoint_exists(ckpt.model_checkpoint_path):
+            raise ValueError('Model is not trained.')
+            
+        with tf.Graph() as graph:
+            with tf.name_scope('model') as scope:
+                inputs = input_getter()
+                if hasattr(self._model, 'inference') and callable(self._model.inference):
+                    outputs = self._model.inference(*inputs)
+                else:
+                    outputs = self._model.forward(False, *inputs)
+                    
+                model_saver = tf.train.Saver(tf.trainable_variables())
+                
+        with tf.Session(config=tf.ConfigProto(gpu_options=tf.GPUOptions(allow_growth=True)), graph=graph) as sess:
+            sess.run(tf.global_variables_initializer())
+            
+            if outputs_names:
+                outputs = [sess.graph.get_tensor_by_name(item) for item in outputs_names]
+
+            model_saver.restore(sess, ckpt.model_checkpoint_path)
+
+            output_graph_def = tf.graph_util.convert_variables_to_constants(
+                sess,
+                tf.get_default_graph().as_graph_def(),
+                [node.name.split(':')[0] for node in outputs]
+            )
+
+            with tf.gfile.GFile(os.path.join(training_dir_path, 'graph.frozen.pb'), "wb") as f:
+                f.write(output_graph_def.SerializeToString())
+
+            print('%d ops in the final graph.' % len(output_graph_def.node))
+            print('The frozen graph is stored in file: `%s`' % os.path.join(PATH_TO_MODEL, 'graph.frozen.pb'))
+    
     #
     # private section
     #
