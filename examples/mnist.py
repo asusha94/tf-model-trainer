@@ -21,7 +21,7 @@ except ModuleNotFoundError:
 mnist = input_data.read_data_sets("training/data/mnist/", one_hot=False)
 
 
-def model(is_training_mode, images, labels):
+def forward(is_training_mode, images, labels):
     input_layer = tf.reshape(images, [-1, 28, 28, 1])
 
     # Convolutional Layer #1
@@ -55,21 +55,24 @@ def model(is_training_mode, images, labels):
     # Logits Layer
     logits = tf.layers.dense(inputs=dropout, units=10, name='dense2')
 
-    return logits, tf.argmax(input=logits, axis=1)
+    return logits
 
 
-def loss(images, labels, logits, classes):
+def loss(images, labels, logits):
     return tf.losses.sparse_softmax_cross_entropy(labels=labels, logits=logits)
 
 
-def metrics(images, labels, logits, classes):
-#     return tf.reduce_mean(tf.cast(tf.equal(labels, tf.cast(classes, tf.int32)), tf.float32))
-    pass
+def metrics(model):
+    _, labels = model.inputs
+    logits = model.outputs
+    classes = tf.argmax(tf.nn.softmax(logits, axis=1), axis=1)
+    return tf.reduce_mean(tf.cast(tf.equal(labels, tf.cast(classes, tf.int32)), tf.float32))
 
 
-def summary(step, learning_rate, grads, loss, avg_losses, metrics):
+def summary(model, step, learning_rate, grads, metrics):
+    tf.summary.scalar('accuracy', metrics)
     tf.summary.scalar('learning-rate', learning_rate)
-    tf.summary.scalar('loss', loss)
+    tf.summary.scalar('loss', tf.add_n(model.losses))
 
     valid_summary_op = tf.summary.merge_all()
 
@@ -81,8 +84,9 @@ def summary(step, learning_rate, grads, loss, avg_losses, metrics):
 
 
 model = ModelBuilder() \
-    .set_model(model) \
-    .set_loss(loss)
+    .set_forward(forward) \
+    .set_loss(loss) \
+    .build()
 
 trainer_options = dict(
     n_training_steps=100000,
@@ -99,5 +103,5 @@ if __name__ == '__main__':
         .set_metrics(metrics) \
         .set_summary(summary) \
         .train(train_data_sources=[lambda inp, lbl: {inp: mnist.train.images, lbl: mnist.train.labels}],
-            valid_data_sources=[lambda inp, lbl: {inp: mnist.validation.images, lbl: mnist.validation.labels}],
-            verbose=True)
+               valid_data_sources=[lambda inp, lbl: {inp: mnist.validation.images, lbl: mnist.validation.labels}],
+               verbose=True)

@@ -63,7 +63,7 @@ def _residual_v1(x,
         tf.logging.info('image after unit %s: %s', name_scope, x.get_shape())
         return x
     
-def model(is_training_mode, images, labels):
+def forward(is_training_mode, images, labels):
     filters = [16, 16, 32, 64]
     strides = [1, 2, 2]
     num_layers = 44
@@ -109,14 +109,17 @@ def loss(images, labels, logits):
     return tf.losses.sparse_softmax_cross_entropy(labels=labels, logits=logits)
 
 
-def metrics(images, labels, logits):
-#     return tf.reduce_mean(tf.cast(tf.equal(labels, tf.cast(classes, tf.int32)), tf.float32))
-    pass
+def metrics(model):
+    _, labels = model.inputs
+    logits = model.outputs
+    classes = tf.argmax(tf.nn.softmax(logits, axis=1), axis=1)
+    return tf.reduce_mean(tf.cast(tf.equal(labels, tf.cast(classes, tf.int32)), tf.float32))
 
 
-def summary(step, learning_rate, grads, loss, losses, metrics):
+def summary(model, step, learning_rate, grads, metrics):
+    tf.summary.scalar('accuracy', metrics)
     tf.summary.scalar('learning-rate', learning_rate)
-    tf.summary.scalar('loss', loss)
+    tf.summary.scalar('loss', tf.add_n(model.losses))
 
     valid_summary_op = tf.summary.merge_all()
 
@@ -134,8 +137,9 @@ tf.set_random_seed(42)
 
 
 model = ModelBuilder() \
-    .set_model(model) \
-    .set_loss(loss)
+    .set_forward(forward) \
+    .set_loss(loss) \
+    .build()
 
 trainer_options = dict(
     n_training_steps=100000,
@@ -155,4 +159,5 @@ if __name__ == '__main__':
         .set_summary(summary) \
         .train(train_data_sources=[lambda inp, lbl: {inp: x_train, lbl: y_train}],
                valid_data_sources=[lambda inp, lbl: {inp: x_test, lbl: y_test}],
-               verbose=True)
+               verbose=True,
+               auto_freeze=dict(input_getter=lambda: (tf.placeholder(tf.float32, [None, 32, 32, 3], "images"), None)))

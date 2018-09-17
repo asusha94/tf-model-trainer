@@ -56,7 +56,7 @@ def local_device_setter(num_devices=1,
 
 class ModelBuilder:
     def __init__(self):
-        self._model_fn = None
+        self._forward_fn = None
         self._loss_fn = None
         self._exclude_params = None
 
@@ -65,11 +65,11 @@ class ModelBuilder:
         self._exclude_params = exclude_params
         return self
 
-    def set_model(self, model):
-        if not callable(model):
-            raise ValueError('model: is not callable')
+    def set_forward(self, forward):
+        if not callable(forward):
+            raise ValueError('forward: is not callable')
 
-        self._model_fn = model
+        self._forward_fn = forward
         return self
 
     def set_loss(self, loss):
@@ -79,19 +79,21 @@ class ModelBuilder:
         self._loss_fn = loss
         return self
 
-    def __call__(self):
+    def build(self):
+        forward_fn = self._forward_fn
+        loss_fn = self._loss_fn
+        exclude_params = self._exclude_params
+        
         class AnonymousModel:
-            def __init__(self, model_fn, loss_fn, exclude_params):
-                self._model_fn = model_fn
+            def __init__(self):
+                self._forward_fn = forward_fn
                 self._loss_fn = loss_fn
                 self._exclude_params = exclude_params
 
             def forward(self, is_training_mode, *inputs):
                 self.inputs = inputs
                 
-                self.outputs = self._model_fn(is_training_mode, *self.inputs)
-                if not isinstance(self.outputs, (tuple, list)):
-                    self.outputs = [self.outputs]
+                self.outputs = self._forward_fn(is_training_mode, *self.inputs)
                     
                 params = tf.trainable_variables()
 
@@ -103,31 +105,36 @@ class ModelBuilder:
                 if exclude_params:
                     params = [param for param in params if param.name not in exclude_params]
 
-                self._params = params
+                self.params = params
 
                 return self.outputs
 
             def loss(self, scope=None):
-                self._loss_fn(*self.inputs, *self.outputs)
+                outputs = self.outputs
+                if not isinstance(outputs, (tuple, list)):
+                    outputs = [outputs]
+                    
+                self._loss_fn(*self.inputs, *outputs)
                 
                 losses = tf.losses.get_losses(scope=scope)
                 reg_losses = tf.losses.get_regularization_losses(scope=scope)
 
-                loss = tf.add_n(losses)
+                self._loss = tf.add_n(losses)
                 if len(reg_losses):
-                    loss = loss + tf.add_n(reg_losses)
+                    self._loss = train_loss + tf.add_n(reg_losses)
+                
+                self.losses = losses
+                self.reg_losses = reg_losses
 
-                self._loss = loss
-
-                return losses, reg_losses
+                return losses
 
             def gradients(self):
-                _params = self._params
+                _params = self.params
 
                 grads = tf.gradients(self._loss, _params)
                 return list(zip(grads, _params))
         
-        return AnonymousModel(self._model_fn, self._loss_fn, self._exclude_params)
+        return AnonymousModel
 
 
 class Trainer:
@@ -203,25 +210,25 @@ class Trainer:
 
         return self
     
-    def set_model(self, model):
+    def set_model(self, model_getter):
         '''
         Arguments
         ---------
-        model
+        model_getter
         '''
-        if callable(model):
-            model = model()
+        if not hasattr(model_getter, 'forward'):
+            raise ValueError('model_getter: has not `forward` method')
 
-        if not hasattr(model, 'forward'):
-            raise ValueError('model: has not `forward` method')
+        if not hasattr(model_getter, 'loss'):
+            raise ValueError('model_getter: has not `loss` method')
 
-        if not hasattr(model, 'loss'):
-            raise ValueError('model: has not `loss` method')
+        if not hasattr(model_getter, 'gradients'):
+            raise ValueError('model_getter: has not `gradients` method')
 
-        if not hasattr(model, 'gradients'):
-            raise ValueError('model: has not `gradients` method')
-
-        self.model = model
+        if isinstance(model_getter, type):
+            self._model_getter = model_getter
+        else:
+            self._model_getter = lambda: model_getter
 
         self._is_builded = False
 
@@ -252,7 +259,7 @@ class Trainer:
         return self
     
     def train(self, train_data_sources, valid_data_sources, model_initial_weights_loader=None,
-              pre_start_hooks=[], pre_train_hooks=[], post_train_hooks=[], pre_end_hooks=[], verbose=False, training_dir_path=None):
+              verbose=False, training_dir_path=None, auto_freeze=None):
         self._build_graph()
 
         TRAINING_DIR = self.training_dir_path
@@ -311,15 +318,12 @@ class Trainer:
                     print('[Failed]', flush=True) 
                 raise
 
-            if pre_start_hooks:
-                for item in pre_start_hooks:
-                    if callable(item):
-                        item(sess)
-
             if model_initial_weights_loader is not None:
                 model_initial_weights_loader(sess)
-            elif hasattr(self.model, 'preload_weights_op') and callable(self.model.preload_weights_op):
-                self._model.preload_weights_op()(sess)
+            else:
+                model = self._towers_models[0]
+                if hasattr(model, 'preload_weights_op') and callable(model.preload_weights_op):
+                    model.preload_weights_op()(sess)
                     
             ckpt = tf.train.get_checkpoint_state(TRAINING_DIR)
             if ALLOW_RESTORING and ckpt and tf.train.checkpoint_exists(ckpt.model_checkpoint_path):
@@ -351,20 +355,10 @@ class Trainer:
                     start = time.time()
                     
                 for _ in range(_step, TRAINING_STEPS):
-                    if pre_train_hooks:
-                        for item in pre_train_hooks:
-                            if callable(item):
-                                item(sess, _step)
-
                     run_metadata = tf.RunMetadata()
                     sess.run(self.train_op, {self.is_training_mode: True, self.data_loader_mode: 'train-pipe'}, run_metadata=run_metadata)
                     
                     _step = int(sess.run(self._step_var))
-
-                    if post_train_hooks:
-                        for item in post_train_hooks:
-                            if callable(item):
-                                item(sess, _step)
                     
                     if _step % STEPS_PER_SUMMARY == 0:
                         _train_loss, _train_summary = sess.run([self.total_loss, self.train_summary_op], {self.data_loader_mode: 'train-pipe'})
@@ -386,35 +380,53 @@ class Trainer:
             finally:
                 self.saver.save(sess, checkpoint_path, global_step=_step)
                 tf.train.write_graph(sess.graph_def, TRAINING_DIR, 'graph.pb', as_text=False)
+                if auto_freeze:
+                    try:
+                        if verbose:
+                            print('Freezing...',  flush=True, end='')
 
-    def freeze(self, input_getter, outputs_names=None, training_dir_path=None, ckpt_path=None):
+                        self.freeze(**auto_freeze)
+                        
+                        if verbose:
+                            print('[OK]', flush=True)
+                    except:
+                        if verbose:
+                            print('[Failed]', flush=True) 
+                        raise
+
+    def freeze(self, input_getter, outputs_names=None, training_dir_path=None, ckpt_path=None, graph_protected_nodes=None):
         if not input_getter:
             raise ValueError('input_getter: is empty')
             
-        if not callable(input_getter)
+        if not callable(input_getter):
             raise ValueError('input_getter: is not callable')
             
-        if not outputs_names:
-            raise ValueError('outputs_names: is empty')
-            
-        if training_dir_path is Nont:
+        if training_dir_path is None:
             training_dir_path = self.training_dir_path
             
-        if ckpt_path is None:
-            ckpt_path = os.path.join(training_dir_path, 'model.ckpt')
+        ckpt = tf.train.get_checkpoint_state(training_dir_path)
         
-        ckpt = tf.train.get_checkpoint_state(ckpt_path)
-        if not ckpt or not tf.train.checkpoint_exists(ckpt.model_checkpoint_path):
+        if ckpt_path is None:
+            ckpt_path = ckpt.model_checkpoint_path if ckpt else None
+        
+        if not ckpt_path or not tf.train.checkpoint_exists(ckpt.model_checkpoint_path):
             raise ValueError('Model is not trained.')
             
-        with tf.Graph() as graph:
+        graph = tf.Graph()
+        with graph.as_default():
             with tf.name_scope('model') as scope:
                 inputs = input_getter()
-                if hasattr(self._model, 'inference') and callable(self._model.inference):
-                    outputs = self._model.inference(*inputs)
+                model = self._model_getter()
+                if hasattr(model, 'inference') and callable(model.inference):
+                    outputs = model.inference(*inputs)
                 else:
-                    outputs = self._model.forward(False, *inputs)
+                    outputs = model.forward(False, *inputs)
                     
+                if not isinstance(outputs, (tuple, list)):
+                    outputs = [outputs]
+                    
+                tf.graph_util.remove_training_nodes(graph.as_graph_def(), graph_protected_nodes)
+                
                 model_saver = tf.train.Saver(tf.trainable_variables())
                 
         with tf.Session(config=tf.ConfigProto(gpu_options=tf.GPUOptions(allow_growth=True)), graph=graph) as sess:
@@ -424,10 +436,10 @@ class Trainer:
                 outputs = [sess.graph.get_tensor_by_name(item) for item in outputs_names]
 
             model_saver.restore(sess, ckpt.model_checkpoint_path)
-
+            
             output_graph_def = tf.graph_util.convert_variables_to_constants(
                 sess,
-                tf.get_default_graph().as_graph_def(),
+                sess.graph.as_graph_def(),
                 [node.name.split(':')[0] for node in outputs]
             )
 
@@ -435,7 +447,7 @@ class Trainer:
                 f.write(output_graph_def.SerializeToString())
 
             print('%d ops in the final graph.' % len(output_graph_def.node))
-            print('The frozen graph is stored in file: `%s`' % os.path.join(PATH_TO_MODEL, 'graph.frozen.pb'))
+            print('The frozen graph is stored in file: `%s`' % os.path.join(training_dir_path, 'graph.frozen.pb'))
     
     #
     # private section
@@ -559,9 +571,8 @@ class Trainer:
                              else tf.contrib.training.GreedyLoadBalancingStrategy(
                                 len(self._gpus), tf.contrib.training.byte_size_load_fn)))
 
-    def _setup_model(self, parent_scope):        
-        self._towers_outputs = []
-        self._towers_losses = []
+    def _setup_model(self, parent_scope):
+        self._towers_models = []
         self._towers_grads = []
 
         def build_model(scope, grads_factor=1.):
@@ -570,15 +581,17 @@ class Trainer:
                              exclusive=True)
 
             _batch = [tf.identity(item, name='batch/item-%i' % i) for i, item in enumerate(_batch)]
-
+            
+            model = self._model_getter()
             with scope as scope:
-                outputs = self.model.forward(self.is_training_mode, *_batch)
-                if not isinstance(outputs, (tuple, list)):
-                    outputs = [outputs]
+                model.forward(self.is_training_mode, *_batch)
 
-                losses, reg_losses = self.model.loss(scope)
+                losses = model.loss(scope)
+                
+                if not losses:
+                    losses = tf.losses.get_losses(scope=scope)
                     
-                gradvars = self.model.gradients()
+                gradvars = model.gradients()
                 
                 if self.grad_clip_value is not None:
                     with tf.name_scope('grads-clipping'):
@@ -590,10 +603,10 @@ class Trainer:
                         multiplier = tf.constant(grads_factor / len(self._gpus), dtype=tf.float32)
                         gradvars = [((tf.multiply(grad, multiplier) if grad is not None else grad), var) for grad, var in gradvars]
 
-                return (outputs, _batch), (losses, reg_losses), gradvars
+                return model, losses, gradvars
 
+        var_scope = tf.get_variable_scope()
         if len(self._gpus) > 1:
-            var_scope = tf.get_variable_scope()
             for i, name in enumerate(self._gpus):
                 with tf.device(self._get_device_setter(name)):
                     result_set = []
@@ -609,12 +622,12 @@ class Trainer:
                             result_set.append(result)
 
                     if len(result_set) == 1:
-                        (outputs, _batch), (losses, reg_losses), gradvars = result_set[0]
+                        model, losses_, gradvars = result_set[0]
                     else:
-                        data, losses, gradvars = zip(*result_set)
+                        models, losses_list, gradvars = zip(*result_set)
 
-                        outputs, _batch = data[0]
-                        losses, reg_losses = losses[0]
+                        model = models[0]
+                        losses_ = losses_list[0]
 
                         with tf.name_scope('gradient-summing'):
                             all_grads = {}
@@ -634,31 +647,26 @@ class Trainer:
                                         
                                 gradvars.append((avg_grad, var))
 
-                    self._towers_outputs.append((outputs, _batch))
-                    self._towers_losses.append((losses, reg_losses))
-
+                    self._towers_models.append(model)
                     self._towers_grads.append(gradvars)
 
                     if i == 0:
                         self._update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS, scope=parent_scope)
-                        self._losses = losses
+                        losses = losses_
         else:
             with tf.variable_scope(var_scope):
                 if len(self._gpus):
                     with tf.device(self._get_device_setter(self._gpus[0])):
-                        (outputs, _batch), (losses, reg_losses), gradvars = build_model(tf.name_scope(parent_scope))
+                        model, losses, gradvars = build_model(tf.name_scope(parent_scope))
                 else:
-                    (outputs, _batch), (losses, reg_losses), gradvars = build_model(tf.name_scope(parent_scope))
+                    model, losses, gradvars = build_model(tf.name_scope(parent_scope))
                 
-                self._towers_outputs.append((outputs, _batch))
-                self._towers_losses.append((losses, reg_losses))
-
+                self._towers_models.append(model)
                 self._towers_grads.append(gradvars)
                 
                 self._update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS, scope=parent_scope)
-                self._losses = losses
 
-        self.total_loss = tf.add_n(self._losses)
+        self.total_loss = tf.add_n(losses)
 
     def _setup_train_op(self):
         step_var = tf.Variable(0, trainable=False)
@@ -707,15 +715,22 @@ class Trainer:
 
     def _setup_metrics(self):
         with tf.name_scope('metrics'):
-            outputs, batch = self._towers_outputs[0]
+            model = self._towers_models[0]
             with tf.device(self._get_device_setter(self._gpus[0]) if len(self._gpus) > 1 else None):
-                metrics = self.metrics_getter(*batch, *outputs)
+                if hasattr(model, 'metrics') and callable(model, 'metrics'):
+                    metrics = model.metrics()
+                else:
+                    metrics = self.metrics_getter(model)
 
             self._metrics = metrics
 
     def _setup_summary(self):
-        ops = self.summary_getter(
-            self._step_var, self._learning_rate, self._grads, self.total_loss, self._losses, self._metrics)
+        model = self._towers_models[0]
+        if hasattr(model, 'summary') and callable(model, 'summary'):
+            ops = model.summary(self._step_var, self._learning_rate, self._grads)
+        else:
+            ops = self.summary_getter(
+                model, self._step_var, self._learning_rate, self._grads, self._metrics)
         self.train_summary_op, self.valid_summary_op = ops
 
         
