@@ -3,141 +3,9 @@ import os
 import shutil
 import tensorflow as tf
 import time
+import types
 import operator
-
-
-def add_grads_summary(grads):
-    with tf.name_scope('grads_summary'):
-        for grad, var in grads:
-            if grad is not None:
-                grad_ = tf.boolean_mask(grad, tf.is_finite(grad))
-                tf.summary.scalar('gradients/' + var.op.name, tf.norm(grad_))
-                tf.summary.histogram('gradients/' + var.op.name, grad_)
-
-
-def get_available_gpus():
-    from tensorflow.python.client import device_lib
-
-    local_device_protos = device_lib.list_local_devices()
-    return [x.name for x in local_device_protos if x.device_type == 'GPU']
-
-
-def local_device_setter(num_devices=1,
-                        ps_device_type='cpu',
-                        worker_device='/cpu:0',
-                        ps_ops=None,
-                        ps_strategy=None):
-    from tensorflow.python.training import device_setter
-    from tensorflow.python.framework import device as pydev
-    from tensorflow.core.framework import node_def_pb2
-
-    if ps_ops == None:
-        ps_ops = ['Variable', 'VariableV2', 'VarHandleOp']
-
-    if ps_strategy is None:
-        ps_strategy = device_setter._RoundRobinStrategy(num_devices)
-    if not callable(ps_strategy):
-        raise TypeError("ps_strategy must be callable")
-
-    def _local_device_chooser(op):
-        current_device = pydev.DeviceSpec.from_string(op.device or "")
-
-        node_def = op if isinstance(op, node_def_pb2.NodeDef) else op.node_def
-        if node_def.op in ps_ops:
-            ps_device_spec = pydev.DeviceSpec.from_string(
-              '/{}:{}'.format(ps_device_type, ps_strategy(op)))
-
-            ps_device_spec.merge_from(current_device)
-            return ps_device_spec.to_string()
-        else:
-            worker_device_spec = pydev.DeviceSpec.from_string(worker_device or "")
-            worker_device_spec.merge_from(current_device)
-            return worker_device_spec.to_string()
-        
-    return _local_device_chooser
-
-
-class ModelBuilder:
-    def __init__(self):
-        self._forward_fn = None
-        self._loss_fn = None
-        self._exclude_params = None
-
-    def set_exclude_params(self, exclude_params):
-        # callable or list or tuple or None
-        self._exclude_params = exclude_params
-        return self
-
-    def set_forward(self, forward):
-        if not callable(forward):
-            raise ValueError('forward: is not callable')
-
-        self._forward_fn = forward
-        return self
-
-    def set_loss(self, loss):
-        if not callable(loss):
-            raise ValueError('loss: is not callable')
-            
-        self._loss_fn = loss
-        return self
-
-    def build(self):
-        forward_fn = self._forward_fn
-        loss_fn = self._loss_fn
-        exclude_params = self._exclude_params
-        
-        class AnonymousModel:
-            def __init__(self):
-                self._forward_fn = forward_fn
-                self._loss_fn = loss_fn
-                self._exclude_params = exclude_params
-
-            def forward(self, is_training_mode, *inputs):
-                self.inputs = inputs
-                
-                self.outputs = self._forward_fn(is_training_mode, *self.inputs)
-                    
-                params = tf.trainable_variables()
-
-                if callable(self._exclude_params):
-                    exclude_params = self._exclude_params()
-                else:
-                    exclude_params = self._exclude_params
-
-                if exclude_params:
-                    params = [param for param in params if param.name not in exclude_params]
-
-                self.params = params
-
-                return self.outputs
-
-            def loss(self, scope=None):
-                outputs = self.outputs
-                if not isinstance(outputs, (tuple, list)):
-                    outputs = [outputs]
-                    
-                self._loss_fn(*self.inputs, *outputs)
-                
-                losses = tf.losses.get_losses(scope=scope)
-                reg_losses = tf.losses.get_regularization_losses(scope=scope)
-
-                self._loss = tf.add_n(losses)
-                if len(reg_losses):
-                    self._loss = self._loss + tf.add_n(reg_losses)
-                
-                self.losses = losses
-                self.reg_losses = reg_losses
-
-                return losses
-
-            def gradients(self):
-                _params = self.params
-
-                grads = tf.gradients(self._loss, _params)
-                return list(zip(grads, _params))
-        
-        return AnonymousModel
+from .device_utils import get_available_gpus, local_device_setter
 
 
 class Trainer:
@@ -188,7 +56,7 @@ class Trainer:
 
         self.datasets = []
 
-    def add_inputs(self, dataset_placeholders_getter, dataset_mapper=None, needs_flatting=False):
+    def add_inputs(self, *args):
         '''
 
         dataset_placeholders_getter, dataset_mapper=None, needs_flatting=False
@@ -198,14 +66,25 @@ class Trainer:
         *args
 
         '''
-        if not callable(dataset_placeholders_getter):
-            raise ValueError('dataset_placeholders_getter: is not callable')
+        if len(args) == 0:
+            raise ValueError('No inputs provided.')
 
-        if dataset_mapper is not None and not callable(dataset_mapper):
-            raise ValueError('dataset_mapper: is not callable')
+        first = args[0]
+        if callable(first) and isinstance(first, types.FunctionType):
+            dataset_placeholders_getter = first
+            dataset_mapper = args[1] if len(args) > 1 else None
+            needs_flatting = args[2] if len(args) > 2 else False
 
-        self.datasets.append((dataset_placeholders_getter, needs_flatting, dataset_mapper))
-        
+            if not callable(dataset_placeholders_getter):
+                raise ValueError('dataset_placeholders_getter: is not callable')
+
+            if dataset_mapper is not None and not callable(dataset_mapper):
+                raise ValueError('dataset_mapper: is not callable')
+
+            self.datasets.append((dataset_placeholders_getter, needs_flatting, dataset_mapper))
+        else:
+            pass
+            
         self._is_builded = False
 
         return self
@@ -526,6 +405,9 @@ class Trainer:
                 return build()
 
     def _setup_dataset(self):
+        if not len(self.datasets):
+            raise ValueError('No inputs souces were secified.')
+
         N_TRAINERS = max(1, len(self._gpus))
 
         batch_size = self.hparams.get('batch_size', 1)

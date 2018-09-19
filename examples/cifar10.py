@@ -2,20 +2,18 @@ import tensorflow as tf
 from tensorflow.keras.datasets import cifar10
 
 try:
-    from model_trainer import Trainer, add_grads_summary
+    from tf_trainer import ModelBuilder, Trainer
+    from tf_trainer.summary import add_grads_summary
 except ModuleNotFoundError:
-    import importlib.util
     import os
+    import sys
 
     path = os.path.dirname(__file__)
 
-    spec = importlib.util.spec_from_file_location("model_trainer", os.path.join(path, '..', 'src', "model_trainer.py"))
-    model_trainer = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(model_trainer)
-    
-    ModelBuilder = model_trainer.ModelBuilder
-    Trainer = model_trainer.Trainer
-    add_grads_summary = model_trainer.add_grads_summary
+    sys.path = [os.path.join(path, '..', 'src')] + sys.path
+
+    from tf_trainer import ModelBuilder, Trainer
+    from tf_trainer.summary import add_grads_summary
 
 
 def _residual_v1(x,
