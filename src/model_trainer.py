@@ -4,10 +4,7 @@ import shutil
 import tensorflow as tf
 import time
 import operator
-from tensorflow.python.client import device_lib
-from tensorflow.python.training import device_setter
-from tensorflow.python.framework import device as pydev
-from tensorflow.core.framework import node_def_pb2
+
 
 def add_grads_summary(grads):
     with tf.name_scope('grads_summary'):
@@ -19,6 +16,8 @@ def add_grads_summary(grads):
 
 
 def get_available_gpus():
+    from tensorflow.python.client import device_lib
+
     local_device_protos = device_lib.list_local_devices()
     return [x.name for x in local_device_protos if x.device_type == 'GPU']
 
@@ -28,6 +27,10 @@ def local_device_setter(num_devices=1,
                         worker_device='/cpu:0',
                         ps_ops=None,
                         ps_strategy=None):
+    from tensorflow.python.training import device_setter
+    from tensorflow.python.framework import device as pydev
+    from tensorflow.core.framework import node_def_pb2
+
     if ps_ops == None:
         ps_ops = ['Variable', 'VariableV2', 'VarHandleOp']
 
@@ -121,7 +124,7 @@ class ModelBuilder:
 
                 self._loss = tf.add_n(losses)
                 if len(reg_losses):
-                    self._loss = train_loss + tf.add_n(reg_losses)
+                    self._loss = self._loss + tf.add_n(reg_losses)
                 
                 self.losses = losses
                 self.reg_losses = reg_losses
@@ -138,65 +141,62 @@ class ModelBuilder:
 
 
 class Trainer:
-    def __init__(self, n_training_steps=300000,
-                       n_summary_steps=500,
-                       n_dataset_workers=8,
-                       batch_size=24,
-                       buffer_size=100,
-                       learning_rate=1e-4,
-                       learning_rate_decay=0.99,
-                       learning_rate_decay_staircase=False,
-                       n_learning_rate_decay_steps=2000,
-                       dropout_keep_prob=1,
-                       grad_clip_value=20,
-                       n_checkpoint_steps=2500,
-                       gpu_memory_fraction=1.,
-                       training_dir_path='./training',
-                       allow_restoring=True,
-                       dataset_enable_caching=False,
-                       dataset_cache_dir_path=None,
-                       place_vars_on_cpu=False,
-                       use_gready_placement_startegy=False,
-                       grads_sync_steps=1):
-        self.n_training_steps = n_training_steps
-        self.n_summary_steps = n_summary_steps
-        self.n_dataset_workers = n_dataset_workers
-        self.batch_size = batch_size
-        self.buffer_size = buffer_size
-        self.learning_rate = learning_rate
-        self.learning_rate_decay = learning_rate_decay
-        self.learning_rate_decay_staircase = learning_rate_decay_staircase
-        self.n_learning_rate_decay_steps = n_learning_rate_decay_steps
-        self.grad_clip_value = grad_clip_value
-        self.n_checkpoint_steps = n_checkpoint_steps
-        self.gpu_memory_fraction = gpu_memory_fraction
-        self.allow_restoring = allow_restoring
-        self.dropout_keep_prob = dropout_keep_prob
+    def __init__(self, hparams=None, **kwargs):
+        """Initializes a Trainer instance.
 
-        self.training_dir_path = training_dir_path
-        self.gpu_memory_fraction = gpu_memory_fraction
+        Parameters:
+        ---------
+        hparams : :obj:`tf.contrib.training.HParams`, optional
+            Parameters used by the Trainer to construct a computational graph and to execute training loop.
+            The following params are in use:
+                'training_dir_path' : specifies a directory which is used for storing checkpoints and summaries (default: './training').
+                'n_training_steps' : the number of training steps (iterations) (default: 10000).
+                'n_checkpoint_steps' : the number of steps (iterations) per checkpoint saving (default: 1000).
+                'n_summary_steps' : the number of steps (iterations) per summary writing (default: 1000).
+                'allow_restoring' : allows restoring from a saved checkpoint (default: True).
+                'gpu_memory_fraction': sets the fraction of total gpu's memory to be used (default: 0.95).
+                'place_vars_on_cpu' : whether to place variables on CPU or not (default: False).
+                'batch_size' : specifies a batch size.
+                'buffer_size' : specifies a buffer size.
+                'dataset_enable_caching' : allows dataset's tensors caching (default: True).
+                'dataset_cache_dir_path' : the path to a directory where the cache will be placed (default: None).
+                'dataset_n_workers' : the number of workers used in dataset's map functions (default: the number of cores).
+                'multigpu_sync_steps' : the number of iterations on a GPU before synchonization of gradients (default: 1).
+                'use_gready_placement_startegy' : forces to use `tf.contrib.training.GreedyLoadBalancingStrategy` for variable placing (default: False).
+                'grad_clip_value' : sets gradients clipping value for `tf.clip_by_value` (default: None).
+                'grad_clip_norm' : sets gradients clipping value for `tf.clip_by_norm` (default: None).
+                'learning_rate' : the value of a learning rate for an optimizer (default: 0.1).
+                'learning_rate_decay' : forces to use learning rate decay (default: False).
+                'learning_rate_n_decay_steps' : the number of steps to apply decay factor (default: 1000)
+                'learning_rate_decay_staircase' : whether learning rate decaying should look like stairs (default: False).
 
-        self.dataset_enable_caching = dataset_enable_caching
-        self.dataset_cache_dir_path = dataset_cache_dir_path
-        self.dataset_needs_flatting = False
-
-        self.place_vars_on_cpu = place_vars_on_cpu
-        self.use_gready_placement_startegy = use_gready_placement_startegy
+        **kwargs
+            Arbitrary keyword arguments. These arguments override hparams.
+        """
+        self.hparams = tf.contrib.training.HParams(hparams)
         
-        self.grads_sync_steps = max(1, grads_sync_steps)
+        for key, value in kwargs.items():
+            if key in self.hparams:
+                self.hparams.set_hparam(key, value)
+            else:
+                self.hparams.add_hparam(key, value)
 
         self._is_builded = False
         self.saver = None
+
+        self._learning_rate_getter = None
 
         self.datasets = []
 
     def add_inputs(self, dataset_placeholders_getter, dataset_mapper=None, needs_flatting=False):
         '''
-        Arguments
+
+        dataset_placeholders_getter, dataset_mapper=None, needs_flatting=False
+
+        Parameters
         ---------
-        dataset_placeholders_getter
-        dataset_mapper
-        needs_flatting
+        *args
+
         '''
         if not callable(dataset_placeholders_getter):
             raise ValueError('dataset_placeholders_getter: is not callable')
@@ -212,9 +212,20 @@ class Trainer:
     
     def set_model(self, model_getter):
         '''
-        Arguments
+        Parameters
         ---------
-        model_getter
+        model_getter : type
+            An instance of some model type. The type must have `forward`, `loss`, `gradients` methods:
+
+                class Model:
+                    def forward(self, *inputs): pass
+                    def loss(self, scope): pass
+                    def gradients(self): pass
+        
+        Returns
+        -------
+        Trainer
+            the instance
         '''
         if not hasattr(model_getter, 'forward'):
             raise ValueError('model_getter: has not `forward` method')
@@ -233,6 +244,12 @@ class Trainer:
         self._is_builded = False
 
         return self
+
+    def set_learning_rate_op(self, learning_rate_getter):
+        if not callable(learning_rate_getter):
+            raise ValueError('learning_rate_getter: is not callable')
+
+        self._learning_rate_getter = learning_rate_getter
     
     def set_metrics(self, metrics_getter):
         '''
@@ -258,25 +275,25 @@ class Trainer:
 
         return self
     
-    def train(self, train_data_sources, valid_data_sources, model_initial_weights_loader=None,
+    def train(self, train_data_sources, valid_data_sources,
+              model_initial_weights_loader=None,
               verbose=False, training_dir_path=None, auto_freeze=None):
         self._build_graph()
 
-        TRAINING_DIR = self.training_dir_path
-        if training_dir_path:
-            TRAINING_DIR = training_dir_path
+        if training_dir_path is None:
+            training_dir_path = self.hparams.get('training_dir_path', './training')
 
-        GPU_MEMORY_FRACTION = self.gpu_memory_fraction
+        n_training_steps = self.hparams.get('n_training_steps', 10000)
+        n_checkpoint_steps = self.hparams.get('n_checkpoint_steps', 1000)
+        n_summary_steps = self.hparams.get('n_summary_steps', 1000)
 
-        TRAINING_STEPS = self.n_training_steps
-        STEPS_PER_CHECKPOINT = self.n_checkpoint_steps
-        STEPS_PER_SUMMARY = self.n_summary_steps
-        ALLOW_RESTORING = self.allow_restoring
+        allow_restoring = self.hparams.get('allow_restoring', True)
+        gpu_memory_fraction = self.hparams.get('gpu_memory_fraction', 0.95)
 
-        if not os.path.exists(TRAINING_DIR):
-            os.makedirs(TRAINING_DIR)
+        if not os.path.exists(training_dir_path):
+            os.makedirs(training_dir_path)
 
-        checkpoint_path = os.path.join(TRAINING_DIR, 'model.ckpt')
+        checkpoint_path = os.path.join(training_dir_path, 'model.ckpt')
 
         def setup_feed(data_sources, feed_dict):
             if callable(data_sources):
@@ -288,7 +305,8 @@ class Trainer:
             else:
                 raise ValueError('Unknown data source format')
 
-        gpu_options = tf.GPUOptions(allow_growth=True, per_process_gpu_memory_fraction=GPU_MEMORY_FRACTION)
+        gpu_options = tf.GPUOptions(allow_growth=True,
+                                    per_process_gpu_memory_fraction=gpu_memory_fraction)
         with tf.Session(config=tf.ConfigProto(allow_soft_placement=True, gpu_options=gpu_options)) as sess:
             try:
                 if verbose:
@@ -325,17 +343,17 @@ class Trainer:
                 if hasattr(model, 'preload_weights_op') and callable(model.preload_weights_op):
                     model.preload_weights_op()(sess)
                     
-            ckpt = tf.train.get_checkpoint_state(TRAINING_DIR)
-            if ALLOW_RESTORING and ckpt and tf.train.checkpoint_exists(ckpt.model_checkpoint_path):
+            ckpt = tf.train.get_checkpoint_state(training_dir_path)
+            if allow_restoring and ckpt and tf.train.checkpoint_exists(ckpt.model_checkpoint_path):
                 self.saver.restore(sess, ckpt.model_checkpoint_path)
             else:
-                shutil.rmtree(TRAINING_DIR)
+                shutil.rmtree(training_dir_path)
                 self.saver.save(sess, checkpoint_path)
 
-            tf.train.write_graph(sess.graph_def, TRAINING_DIR, 'graph.pb', as_text=False)
+            tf.train.write_graph(sess.graph_def, training_dir_path, 'graph.pb', as_text=False)
             
-            _train_summary_writer = tf.summary.FileWriter(os.path.join(TRAINING_DIR, 'summary', 'train'), sess.graph)
-            _valid_summary_writer = tf.summary.FileWriter(os.path.join(TRAINING_DIR, 'summary', 'valid'), sess.graph)
+            _train_summary_writer = tf.summary.FileWriter(os.path.join(training_dir_path, 'summary', 'train'), sess.graph)
+            _valid_summary_writer = tf.summary.FileWriter(os.path.join(training_dir_path, 'summary', 'valid'), sess.graph)
             
             try:
                 _step = int(sess.run(self._step_var))
@@ -354,13 +372,13 @@ class Trainer:
                 if verbose:
                     start = time.time()
                     
-                for _ in range(_step, TRAINING_STEPS):
+                for _ in range(_step, n_training_steps):
                     run_metadata = tf.RunMetadata()
                     sess.run(self.train_op, {self.is_training_mode: True, self.data_loader_mode: 'train-pipe'}, run_metadata=run_metadata)
                     
                     _step = int(sess.run(self._step_var))
                     
-                    if _step % STEPS_PER_SUMMARY == 0:
+                    if _step % n_summary_steps == 0:
                         _train_loss, _train_summary = sess.run([self.total_loss, self.train_summary_op], {self.data_loader_mode: 'train-pipe'})
                         _valid_loss, _valid_summary = sess.run([self.total_loss, self.valid_summary_op], {self.data_loader_mode: 'valid-pipe'})
                         _train_summary_writer.add_summary(_train_summary, _step)
@@ -372,14 +390,25 @@ class Trainer:
                             start = time.time()
                             print('Step #%i: train loss = %.6f, valid loss = %.6f, elapsed %.3f sec.' % (_step, _train_loss, _valid_loss, elapsed), flush=True)
 
-                    if _step % STEPS_PER_CHECKPOINT == 0:
-                        self.saver.save(sess, checkpoint_path, global_step=_step)
+                    if _step % n_checkpoint_steps == 0:
+                        try:
+                            if verbose:
+                                print('Saving checkpoint...',  flush=True, end='')
+
+                            self.saver.save(sess, checkpoint_path, global_step=_step)
+
+                            if verbose:
+                                print('[OK]', flush=True)
+                        except:
+                            if verbose:
+                                print('[Failed]', flush=True) 
+                            raise
 
                 if verbose:
                     print('Training process is finished.', flush=True)
             finally:
                 self.saver.save(sess, checkpoint_path, global_step=_step)
-                tf.train.write_graph(sess.graph_def, TRAINING_DIR, 'graph.pb', as_text=False)
+                tf.train.write_graph(sess.graph_def, training_dir_path, 'graph.pb', as_text=False)
                 if auto_freeze:
                     try:
                         if verbose:
@@ -394,7 +423,10 @@ class Trainer:
                             print('[Failed]', flush=True) 
                         raise
 
-    def freeze(self, input_getter, outputs_names=None, training_dir_path=None, ckpt_path=None, graph_protected_nodes=None):
+    def freeze(self, input_getter, outputs_names=None,
+               training_dir_path=None, ckpt_path=None, graph_protected_nodes=None):
+        """
+        """
         if not input_getter:
             raise ValueError('input_getter: is empty')
             
@@ -402,7 +434,7 @@ class Trainer:
             raise ValueError('input_getter: is not callable')
             
         if training_dir_path is None:
-            training_dir_path = self.training_dir_path
+            training_dir_path = self.hparams.get('training_dir_path', './training')
             
         ckpt = tf.train.get_checkpoint_state(training_dir_path)
         
@@ -414,7 +446,7 @@ class Trainer:
             
         graph = tf.Graph()
         with graph.as_default():
-            with tf.name_scope('model') as scope:
+            with tf.name_scope('model'):
                 inputs = input_getter()
                 model = self._model_getter()
                 if hasattr(model, 'inference') and callable(model.inference):
@@ -484,7 +516,7 @@ class Trainer:
 
                 self._is_builded = True
 
-            if self.place_vars_on_cpu:
+            if self.hparams.get('place_vars_on_cpu', False):
                 with tf.device('/cpu:0'):
                     return build()
             elif self._gpus:
@@ -496,10 +528,15 @@ class Trainer:
     def _setup_dataset(self):
         N_TRAINERS = max(1, len(self._gpus))
 
-        if self.dataset_cache_dir_path:
-            CACHE_DIR_PATH = self.dataset_cache_dir_path if self.dataset_cache_dir_path.endswith('/') else (self.dataset_cache_dir_path + '/')
-        else:
-            CACHE_DIR_PATH = None
+        batch_size = self.hparams.get('batch_size', 1)
+        buffer_size = self.hparams.get('buffer_size', batch_size)
+        dataset_enable_caching = self.hparams.get('dataset_enable_caching', False)
+        dataset_cache_dir_path = self.hparams.get('dataset_cache_dir_path', None)
+        dataset_n_workers = self.hparams.get('dataset_n_workers', )
+        multigpu_sync_steps = max(1, self.hparams.get('multigpu_sync_steps', 1))
+
+        if dataset_cache_dir_path and not dataset_cache_dir_path.endswith('/'):
+            dataset_cache_dir_path = dataset_cache_dir_path + '/'
 
         datasets = []
         datasets_placeholders = []
@@ -508,7 +545,7 @@ class Trainer:
             if not isinstance(dataset_placeholders, (tuple, list)):
                 raise ValueError('dataset_placeholders: is neither a tuple nor a list')
 
-            if self.dataset_enable_caching and CACHE_DIR_PATH is not None:
+            if dataset_enable_caching and dataset_cache_dir_path is not None:
                 pipe_name_tf_phr = tf.placeholder(tf.string, name='pipe_name')
             else:
                 pipe_name_tf_phr = None
@@ -516,21 +553,21 @@ class Trainer:
             dataset = tf.data.Dataset().from_tensor_slices(dataset_placeholders)
 
             if dataset_mapper is not None:
-                dataset = dataset.map(dataset_mapper, self.n_dataset_workers)
+                dataset = dataset.map(dataset_mapper, dataset_n_workers)
                 dataset = dataset.apply(tf.contrib.data.ignore_errors())
 
-            if self.dataset_enable_caching:
-                if CACHE_DIR_PATH is not None and pipe_name_tf_phr is not None:
-                    if not os.path.exists(CACHE_DIR_PATH):
-                        os.makedirs(CACHE_DIR_PATH)
-                    dataset = dataset.cache(tf.constant(CACHE_DIR_PATH + ('data-%i-' % i)) + pipe_name_tf_phr)
+            if dataset_enable_caching:
+                if dataset_cache_dir_path is not None and pipe_name_tf_phr is not None:
+                    if not os.path.exists(dataset_cache_dir_path):
+                        os.makedirs(dataset_cache_dir_path)
+                    dataset = dataset.cache(tf.constant(dataset_cache_dir_path + ('data-%i-' % i)) + pipe_name_tf_phr)
                 else:
                     dataset = dataset.cache()
 
             if dataset_needs_flatting:
                 dataset = dataset.flat_map(lambda *samples: tf.data.Dataset.from_tensor_slices(samples))
 
-            dataset = dataset.shuffle(buffer_size=self.buffer_size)
+            dataset = dataset.shuffle(buffer_size=buffer_size)
             dataset = dataset.repeat()
 
             if len(datasets) > 0:
@@ -546,8 +583,8 @@ class Trainer:
             dataset = tf.data.Dataset.from_tensor_slices(datasets)
             dataset = dataset.interleave(lambda d: d, cycle_length=len(datasets), block_length=1)
 
-        dataset = dataset.batch(batch_size=self.batch_size)
-        dataset = dataset.prefetch(buffer_size=N_TRAINERS*(self.grads_sync_steps if N_TRAINERS > 1 else 1))
+        dataset = dataset.batch(batch_size=batch_size)
+        dataset = dataset.prefetch(buffer_size=N_TRAINERS*(multigpu_sync_steps if N_TRAINERS > 1 else 1))
 
         self.pipe_name_tf_phr = pipe_name_tf_phr
 
@@ -561,19 +598,25 @@ class Trainer:
         self.valid_batch = self.valid_iterator.get_next
 
     def _get_device_setter(self, name):
-        if self.place_vars_on_cpu:
+        if self.hparams.get('place_vars_on_cpu', False):
             return local_device_setter(worker_device=name)
         else:
             return local_device_setter(
                 ps_device_type='gpu',
                 worker_device=name,
-                ps_strategy=(None if not self.use_gready_placement_startegy
+                ps_strategy=(None if not self.hparams.get('use_gready_placement_startegy', False)
                              else tf.contrib.training.GreedyLoadBalancingStrategy(
                                 len(self._gpus), tf.contrib.training.byte_size_load_fn)))
 
     def _setup_model(self, parent_scope):
         self._towers_models = []
         self._towers_grads = []
+
+        grad_clip_value = self.hparams.get('grad_clip_value', None)
+        if grad_clip_value is not None:
+            grad_clip_value = float(grad_clip_value)
+
+        multigpu_sync_steps = max(1, self.hparams.get('multigpu_sync_steps', 1))
 
         def build_model(scope, grads_factor=1.):
             _batch = tf.case([(tf.equal(self.data_loader_mode, 'train-pipe'), lambda: self.train_batch()),
@@ -593,10 +636,10 @@ class Trainer:
                     
                 gradvars = model.gradients()
                 
-                if self.grad_clip_value is not None:
+                if grad_clip_value is not None:
                     with tf.name_scope('grads-clipping'):
-                        grad_clip_value = tf.constant(self.grad_clip_value, dtype=tf.float32)
-                        gradvars = [((tf.clip_by_norm(grad, grad_clip_value) if grad is not None else grad), var) for grad, var in gradvars]
+                        tf_grad_clip_value = tf.constant(grad_clip_value, dtype=tf.float32)
+                        gradvars = [((tf.clip_by_norm(grad, tf_grad_clip_value) if grad is not None else grad), var) for grad, var in gradvars]
 
                 if len(self._gpus) > 1:
                     with tf.name_scope('grads-division-for-avg'):
@@ -610,14 +653,14 @@ class Trainer:
             for i, name in enumerate(self._gpus):
                 with tf.device(self._get_device_setter(name)):
                     result_set = []
-                    for s in range(self.grads_sync_steps):
+                    for s in range(multigpu_sync_steps):
                         with tf.variable_scope(var_scope, reuse=tf.AUTO_REUSE):
-                            if self.grads_sync_steps == 1:
+                            if multigpu_sync_steps == 1:
                                 scope = tf.name_scope('tower-%i' % i)
                             else:
                                 scope = tf.name_scope('tower-%i-%i' % (i, s))
 
-                            result = build_model(scope, grads_factor=1./self.grads_sync_steps)
+                            result = build_model(scope, grads_factor=1./multigpu_sync_steps)
 
                             result_set.append(result)
 
@@ -669,19 +712,30 @@ class Trainer:
         self.total_loss = tf.add_n(losses)
 
     def _setup_train_op(self):
+        multigpu_sync_steps = max(1, self.hparams.get('multigpu_sync_steps', 1))
+
         step_var = tf.Variable(0, trainable=False)
 
         with tf.name_scope('optimizer'):
             with tf.name_scope('params'):
-                lr_var = tf.Variable(self.learning_rate, trainable=False)
-                    
-                if self.learning_rate_decay and self.n_learning_rate_decay_steps:
-                    lr_var = tf.train.exponential_decay(
-                        lr_var, step_var, self.n_learning_rate_decay_steps, self.learning_rate_decay,
-                        staircase=self.learning_rate_decay_staircase)
+                if self._learning_rate_getter is not None:
+                    lr_var = self._learning_rate_getter(step_var)
+                else:
+                    learning_rate = self.hparams.get('learning_rate', 0.1)
+                    learning_rate_decay = self.hparams.get('learning_rate_decay', False)
+                    learning_rate_n_decay_steps = self.hparams.get('learning_rate_n_decay_steps', 1000)
+                    learning_rate_decay_staircase = self.hparams.get('learning_rate_decay_staircase', False)
+
+                    lr_var = tf.Variable(learning_rate, trainable=False)
+                        
+                    if learning_rate_decay and learning_rate_n_decay_steps:
+                        lr_var = tf.train.exponential_decay(
+                            lr_var, step_var, learning_rate_n_decay_steps, learning_rate_decay,
+                            staircase=learning_rate_decay_staircase
+                        )
 
             if len(self._gpus) > 1:
-                n_steps = self.grads_sync_steps
+                n_steps = multigpu_sync_steps
             else:
                 n_steps = 1
                 
@@ -732,5 +786,3 @@ class Trainer:
             ops = self.summary_getter(
                 model, self._step_var, self._learning_rate, self._grads, self._metrics)
         self.train_summary_op, self.valid_summary_op = ops
-
-        
