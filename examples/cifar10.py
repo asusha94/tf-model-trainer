@@ -1,19 +1,15 @@
 import tensorflow as tf
 from tensorflow.keras.datasets import cifar10
 
-try:
-    from tf_trainer import ModelBuilder, Trainer
-    from tf_trainer.summary import add_grads_summary
-except ModuleNotFoundError:
-    import os
-    import sys
+import os
+import sys
 
-    path = os.path.dirname(__file__)
+path = os.path.dirname(__file__)
 
-    sys.path = [os.path.join(path, '..', 'src')] + sys.path
+sys.path = [os.path.join(path, '..', 'src')] + sys.path
 
-    from tf_trainer import ModelBuilder, Trainer
-    from tf_trainer.summary import add_grads_summary
+from tf_trainer import ModelBuilder, Trainer
+from tf_trainer.summary import add_grads_summary
 
 
 def _residual_v1(x,
@@ -21,6 +17,7 @@ def _residual_v1(x,
                  in_filter,
                  out_filter,
                  stride,
+                 training,
                  activate_before_residual=False):
     """Residual unit with 2 sub layers, using Plan A for shortcut connection."""
 
@@ -35,7 +32,7 @@ def _residual_v1(x,
             padding="same",
             activation=None)
 
-        x = tf.layers.batch_normalization(x)
+        x = tf.layers.batch_normalization(x, training=training)
 
         x = tf.nn.relu(x)
         
@@ -47,7 +44,7 @@ def _residual_v1(x,
             padding="same",
             activation=None)
 
-        x = tf.layers.batch_normalization(x)
+        x = tf.layers.batch_normalization(x, training=training)
 
         if in_filter != out_filter:
             with tf.name_scope('avg_pool') as name_scope:
@@ -66,7 +63,7 @@ def forward(is_training_mode, images, labels):
     strides = [1, 2, 2]
     num_layers = 44
     
-    input_layer = tf.reshape(images, [-1, 32, 32, 3])
+    input_layer = tf.cast(tf.reshape(images, [-1, 32, 32, 3]), tf.float32)
     
     input_layer = input_layer / 128 - 1
 
@@ -88,16 +85,16 @@ def forward(is_training_mode, images, labels):
             for j in range((num_layers - 2) // 6):
                 if j == 0:
                     # First block in a stage, filters and strides may change.
-                    x = _residual_v1(x, 3, filters[i], filters[i + 1], strides[i])
+                    x = _residual_v1(x, 3, filters[i], filters[i + 1], strides[i], training=is_training_mode)
                 else:
                     # Following blocks in a stage, constant filters and unit stride.
-                    x = _residual_v1(x, 3, filters[i + 1], filters[i + 1], 1)
+                    x = _residual_v1(x, 3, filters[i + 1], filters[i + 1], 1, training=is_training_mode)
 
-    with tf.name_scope('global_avg_pool') as name_scope:
+    with tf.name_scope('global_avg_pool'):
         assert x.get_shape().ndims == 4
         x = tf.reduce_mean(x, [1, 2])
         
-    with tf.name_scope('fully_connected') as name_scope:
+    with tf.name_scope('fully_connected'):
         x = tf.layers.dense(x, 10)
 
     return x
@@ -128,10 +125,17 @@ def summary(model, step, learning_rate, grads, metrics):
     return train_summary_op, valid_summary_op
 
 
-tf.set_random_seed(42)
-
-
 (x_train, y_train), (x_test, y_test) = cifar10.load_data()
+
+
+def feed_dict(state, inputs, labels):
+    if state == 'train':
+        return { inputs: x_train, labels: y_train }
+    elif state == 'valid':
+        return { inputs: x_test, labels: y_test }
+
+
+tf.set_random_seed(42)
 
 
 model = ModelBuilder() \
@@ -142,20 +146,18 @@ model = ModelBuilder() \
 trainer_options = dict(
     n_training_steps=100000,
     training_dir_path='./training/cifar10',
-    place_vars_on_cpu=True,
+    place_vars_on_cpu=False,
     batch_size=96,
-    buffer_size=96*4,
-    grads_sync_steps=2
+    buffer_size=96*4
 )
 
 if __name__ == '__main__':
     Trainer(**trainer_options) \
-        .add_inputs(lambda: (tf.placeholder(tf.float32, [None, 32, 32, 3], "images"),
-                             tf.placeholder(tf.int32, [None, 1], "labels"))) \
+        .add_dataset(lambda: (tf.placeholder(tf.float32, [None, 32, 32, 3], "images"),
+                              tf.placeholder(tf.int32, [None, 1], "labels")),
+                     feed_dict) \
         .set_model(model) \
         .set_metrics(metrics) \
         .set_summary(summary) \
-        .train(train_data_sources=[lambda inp, lbl: {inp: x_train, lbl: y_train}],
-               valid_data_sources=[lambda inp, lbl: {inp: x_test, lbl: y_test}],
-               verbose=True,
+        .train(verbose=True,
                auto_freeze=dict(input_getter=lambda: (tf.placeholder(tf.float32, [None, 32, 32, 3], "images"), None)))

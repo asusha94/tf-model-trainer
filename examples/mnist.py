@@ -1,19 +1,15 @@
 import tensorflow as tf
 from tensorflow.examples.tutorials.mnist import input_data
 
-try:
-    from tf_trainer import ModelBuilder, Trainer
-    from tf_trainer.summary import add_grads_summary
-except ModuleNotFoundError:
-    import os
-    import sys
+import os
+import sys
 
-    path = os.path.dirname(__file__)
+path = os.path.dirname(__file__)
 
-    sys.path = [os.path.join(path, '..', 'src')] + sys.path
+sys.path = [os.path.join(path, '..', 'src')] + sys.path
 
-    from tf_trainer import ModelBuilder, Trainer
-    from tf_trainer.summary import add_grads_summary
+from tf_trainer import ModelBuilder, Trainer
+from tf_trainer.summary import add_grads_summary
 
 
 mnist = input_data.read_data_sets("training/data/mnist/", one_hot=False)
@@ -81,6 +77,13 @@ def summary(model, step, learning_rate, grads, metrics):
     return train_summary_op, valid_summary_op
 
 
+def feed_dict(state, inputs, labels):
+    if state == 'train':
+        return { inputs: mnist.train.images, labels: mnist.train.labels }
+    elif state == 'valid':
+        return { inputs: mnist.validation.images, labels: mnist.validation.labels }
+
+
 model = ModelBuilder() \
     .set_forward(forward) \
     .set_loss(loss) \
@@ -95,11 +98,10 @@ trainer_options = dict(
 
 if __name__ == '__main__':
     Trainer(**trainer_options) \
-        .add_inputs(lambda: (tf.placeholder(tf.float32, [None, 784], "images"),
-                             tf.placeholder(tf.int32, [None], "labels"))) \
+        .add_dataset(lambda: (tf.placeholder(tf.float32, [None, 784], "images"),
+                              tf.placeholder(tf.int32, [None], "labels")),
+                     feed_dict) \
         .set_model(model) \
         .set_metrics(metrics) \
         .set_summary(summary) \
-        .train(train_data_sources=[lambda inp, lbl: {inp: mnist.train.images, lbl: mnist.train.labels}],
-               valid_data_sources=[lambda inp, lbl: {inp: mnist.validation.images, lbl: mnist.validation.labels}],
-               verbose=True)
+        .train(verbose=True)
