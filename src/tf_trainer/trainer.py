@@ -26,7 +26,7 @@ class Trainer:
                 'place_vars_on_cpu' : whether to place variables on CPU or not (default: False).
                 'batch_size' : specifies a batch size.
                 'buffer_size' : specifies a buffer size.
-                'dataset_enable_caching' : allows dataset's tensors caching (default: True).
+                'dataset_enable_caching' : allows dataset's tensors caching (default: False).
                 'dataset_cache_dir_path' : the path to a directory where the cache will be placed (default: None).
                 'dataset_n_workers' : the number of workers used in dataset's map functions (default: the number of cores).
                 'multigpu_sync_steps' : the number of iterations on a GPU before synchonization of gradients (default: 1).
@@ -34,7 +34,7 @@ class Trainer:
                 'grad_clip_value' : sets gradients clipping value for `tf.clip_by_value` (default: None).
                 'grad_clip_norm' : sets gradients clipping value for `tf.clip_by_norm` (default: None).
                 'learning_rate' : the value of a learning rate for an optimizer (default: 0.1).
-                'learning_rate_decay' : forces to use learning rate decay (default: False).
+                'learning_rate_decay' : if it's values is set, it enables learning rate decay (default: None).
                 'learning_rate_n_decay_steps' : the number of steps to apply decay factor (default: 1000)
                 'learning_rate_decay_staircase' : whether learning rate decaying should look like stairs (default: False).
 
@@ -42,7 +42,7 @@ class Trainer:
             Arbitrary keyword arguments. These arguments override hparams.
         """
         self.hparams = tf.contrib.training.HParams(hparams)
-        
+
         for key, value in kwargs.items():
             if key in self.hparams:
                 self.hparams.set_hparam(key, value)
@@ -57,7 +57,7 @@ class Trainer:
         self._datasets = []
 
     def add_dataset(self, *args):
-        '''Adds a dataset for training. 
+        '''Adds a dataset for training.
 
         1. ```add_dataset(
                 placeholders_getter,
@@ -71,11 +71,11 @@ class Trainer:
         ---------
         placeholders_getter
             a function which provides a tuple of placeholders to form a `tf.data.Dataset` instance.
-        
+
         feed_dict_getter
             a function which provides a dictionary to be feed with the placeholders as a keys.
             this function must have the following signature:
-                
+
                 def feed_dict_getter(state, *placeholders): pass
 
         mapper : optional
@@ -156,11 +156,11 @@ class Trainer:
                 self._datasets.append((dataset, True))
             else:
                 raise ValueError('dataset: has neither `placeholders` nor `get_dataset` methods')
-            
+
         self._is_builded = False
 
         return self
-    
+
     def set_model(self, model_getter):
         '''
         Parameters
@@ -172,7 +172,7 @@ class Trainer:
                     def forward(self, *inputs): pass
                     def loss(self, scope): pass
                     def gradients(self): pass
-        
+
         Returns
         -------
         Trainer
@@ -201,7 +201,7 @@ class Trainer:
             raise ValueError('learning_rate_getter: is not callable')
 
         self._learning_rate_getter = learning_rate_getter
-    
+
     def set_metrics(self, metrics_getter):
         '''
         Arguments
@@ -225,7 +225,7 @@ class Trainer:
         self._is_builded = False
 
         return self
-    
+
     def train(self, model_initial_weights_loader=None,
               verbose=False, training_dir_path=None, auto_freeze=None):
         self._build_graph()
@@ -251,7 +251,7 @@ class Trainer:
             try:
                 if verbose:
                     print('Initializing parameters ', flush=True, end='')
-                
+
                 sess.run(self._init_globals_op)
                 sess.run(self._init_locals_op)
 
@@ -260,7 +260,7 @@ class Trainer:
                     feed = dataset.feed_dict('train')
                     if feed:
                         train_iter_feed_dict.update(feed)
-                
+
                 if self.pipe_name_tf_phr is not None:
                     train_iter_feed_dict[self.pipe_name_tf_phr] = 'train'
 
@@ -276,12 +276,12 @@ class Trainer:
                     train_iter_feed_dict[self.pipe_name_tf_phr] = 'valid'
 
                 sess.run(self.valid_iterator.initializer, valid_iter_feed_dict)
-            
+
                 if verbose:
                     print('[OK]', flush=True)
             except:
                 if verbose:
-                    print('[Failed]', flush=True) 
+                    print('[Failed]', flush=True)
                 raise
 
             if model_initial_weights_loader is not None:
@@ -290,7 +290,7 @@ class Trainer:
                 model = self._towers_models[0]
                 if hasattr(model, 'preload_weights_op') and callable(model.preload_weights_op):
                     model.preload_weights_op()(sess)
-                    
+
             ckpt = tf.train.get_checkpoint_state(training_dir_path)
             if allow_restoring and ckpt and tf.train.checkpoint_exists(ckpt.model_checkpoint_path):
                 self.saver.restore(sess, ckpt.model_checkpoint_path)
@@ -299,10 +299,10 @@ class Trainer:
                 self.saver.save(sess, checkpoint_path)
 
             tf.train.write_graph(sess.graph_def, training_dir_path, 'graph.pb', as_text=False)
-            
+
             _train_summary_writer = tf.summary.FileWriter(os.path.join(training_dir_path, 'summary', 'train'), sess.graph)
             _valid_summary_writer = tf.summary.FileWriter(os.path.join(training_dir_path, 'summary', 'valid'), sess.graph)
-            
+
             try:
                 _step = int(sess.run(self._step_var))
                 if _step == 0:
@@ -316,23 +316,23 @@ class Trainer:
 
                 if verbose:
                     print('Start trainging.', flush=True)
-                
+
                 if verbose:
                     start = time.time()
-                    
+
                 for _ in range(_step, n_training_steps):
                     run_metadata = tf.RunMetadata()
                     sess.run(self.train_op, {self.is_training_mode: True, self.data_loader_mode: 'train-pipe'}, run_metadata=run_metadata)
-                    
+
                     _step = int(sess.run(self._step_var))
-                    
+
                     if _step % n_summary_steps == 0:
                         _train_loss, _train_summary = sess.run([self.total_loss, self.train_summary_op], {self.data_loader_mode: 'train-pipe'})
                         _valid_loss, _valid_summary = sess.run([self.total_loss, self.valid_summary_op], {self.data_loader_mode: 'valid-pipe'})
                         _train_summary_writer.add_summary(_train_summary, _step)
                         _train_summary_writer.add_run_metadata(run_metadata, 'train-op-%i' % _step, _step)
                         _valid_summary_writer.add_summary(_valid_summary, _step)
-                        
+
                         if verbose:
                             elapsed = time.time() - start
                             start = time.time()
@@ -349,7 +349,7 @@ class Trainer:
                                 print('[OK]', flush=True)
                         except:
                             if verbose:
-                                print('[Failed]', flush=True) 
+                                print('[Failed]', flush=True)
                             raise
 
                 if verbose:
@@ -363,12 +363,12 @@ class Trainer:
                             print('Freezing...',  flush=True, end='')
 
                         self.freeze(**auto_freeze)
-                        
+
                         if verbose:
                             print('[OK]', flush=True)
                     except:
                         if verbose:
-                            print('[Failed]', flush=True) 
+                            print('[Failed]', flush=True)
                         raise
 
     def freeze(self, input_getter, outputs_names=None,
@@ -377,21 +377,21 @@ class Trainer:
         """
         if not input_getter:
             raise ValueError('input_getter: is empty')
-            
+
         if not callable(input_getter):
             raise ValueError('input_getter: is not callable')
-            
+
         if training_dir_path is None:
             training_dir_path = self.hparams.get('training_dir_path', './training')
-            
+
         ckpt = tf.train.get_checkpoint_state(training_dir_path)
-        
+
         if ckpt_path is None:
             ckpt_path = ckpt.model_checkpoint_path if ckpt else None
-        
+
         if not ckpt_path or not tf.train.checkpoint_exists(ckpt.model_checkpoint_path):
             raise ValueError('Model is not trained.')
-            
+
         graph = tf.Graph()
         with graph.as_default():
             with tf.name_scope('model'):
@@ -402,22 +402,22 @@ class Trainer:
                         outputs = model.inference(*inputs)
                     else:
                         outputs = model.forward(False, *inputs)
-                    
+
                 if not isinstance(outputs, (tuple, list)):
                     outputs = [outputs]
-                    
+
                 tf.graph_util.remove_training_nodes(graph.as_graph_def(), graph_protected_nodes)
-                
+
                 model_saver = tf.train.Saver(tf.trainable_variables())
-                
+
         with tf.Session(config=tf.ConfigProto(gpu_options=tf.GPUOptions(allow_growth=True)), graph=graph) as sess:
             sess.run(tf.global_variables_initializer())
-            
+
             if outputs_names:
                 outputs = [sess.graph.get_tensor_by_name(item) for item in outputs_names]
 
             model_saver.restore(sess, ckpt.model_checkpoint_path)
-            
+
             output_graph_def = tf.graph_util.convert_variables_to_constants(
                 sess,
                 sess.graph.as_graph_def(),
@@ -429,7 +429,7 @@ class Trainer:
 
             print('%d ops in the final graph.' % len(output_graph_def.node))
             print('The frozen graph is stored in file: `%s`' % os.path.join(training_dir_path, 'graph.frozen.pb'))
-    
+
     #
     # private section
     #
@@ -453,13 +453,13 @@ class Trainer:
 
                 with tf.name_scope('training'):
                     self._setup_train_op()
-                    
+
                     self.saver = tf.train.Saver(tf.global_variables())
 
                     self._setup_metrics()
-                    
+
                 self._setup_summary()
-                
+
                 self._init_globals_op = tf.global_variables_initializer()
                 self._init_locals_op = tf.local_variables_initializer()
 
@@ -484,7 +484,7 @@ class Trainer:
         buffer_size = self.hparams.get('buffer_size', batch_size)
         dataset_enable_caching = self.hparams.get('dataset_enable_caching', False)
         dataset_cache_dir_path = self.hparams.get('dataset_cache_dir_path', None)
-        dataset_n_workers = self.hparams.get('dataset_n_workers', )
+        dataset_n_workers = self.hparams.get('dataset_n_workers', os.cpu_count())
         multigpu_sync_steps = max(1, self.hparams.get('multigpu_sync_steps', 1))
 
         if dataset_cache_dir_path and not dataset_cache_dir_path.endswith('/'):
@@ -527,7 +527,7 @@ class Trainer:
 
                 if len(datasets) > 0:
                     assert datasets[-1].output_shapes == dataset.output_shapes and datasets[-1].output_types == dataset.output_types,\
-                        'Datasets don\'t produce the same types of elements' 
+                        'Datasets don\'t produce the same types of elements'
 
             datasets.append(dataset)
 
@@ -546,7 +546,7 @@ class Trainer:
 
         self.train_iterator = dataset.make_initializable_iterator('train')
         self.valid_iterator = dataset.make_initializable_iterator('valid')
-        
+
         self.train_batch = self.train_iterator.get_next
         self.valid_batch = self.valid_iterator.get_next
 
@@ -579,19 +579,19 @@ class Trainer:
                              exclusive=True)
 
             _batch = [tf.identity(item, name='batch/item-%i' % i) for i, item in enumerate(_batch)]
-            
+
             model = self._model_getter()
-            
+
             def scoped(scope):
                 model.forward(self.is_training_mode, *_batch)
 
                 losses = model.loss(scope)
-                
+
                 if not losses:
                     losses = tf.losses.get_losses(scope=scope)
-                    
+
                 gradvars = model.gradients()
-                
+
                 if grad_clip_value is not None:
                     if isinstance(grad_clip_value, (list, tuple)):
                         grad_clip_value_min, grad_clip_value_max = grad_clip_value
@@ -629,7 +629,7 @@ class Trainer:
                     return scoped(scope)
             else:
                 return scoped(None)
-                
+
         var_scope = 'model'
         if len(self._gpus) > 1:
             for i, name in enumerate(self._gpus):
@@ -666,10 +666,10 @@ class Trainer:
                                     avg_grad = grads[0]
                                 else:
                                     avg_grad = tf.add_n(grads)
-                                
+
                                 with tf.device(var.device):
                                     avg_grad = tf.identity(avg_grad)
-                                        
+
                                 gradvars.append((avg_grad, var))
 
                     self._towers_models.append(model)
@@ -685,10 +685,10 @@ class Trainer:
                         model, losses, gradvars = build_model()
                 else:
                     model, losses, gradvars = build_model()
-                
+
                 self._towers_models.append(model)
                 self._towers_grads.append(gradvars)
-                
+
                 self._update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS)
 
         self.total_loss = tf.add_n(losses)
@@ -704,12 +704,12 @@ class Trainer:
                     lr_var = self._learning_rate_getter(step_var)
                 else:
                     learning_rate = self.hparams.get('learning_rate', 0.01)
-                    learning_rate_decay = self.hparams.get('learning_rate_decay', False)
+                    learning_rate_decay = self.hparams.get('learning_rate_decay', None)
                     learning_rate_n_decay_steps = self.hparams.get('learning_rate_n_decay_steps', 1000)
                     learning_rate_decay_staircase = self.hparams.get('learning_rate_decay_staircase', False)
 
                     lr_var = tf.Variable(learning_rate, trainable=False)
-                        
+
                     if learning_rate_decay and learning_rate_n_decay_steps:
                         lr_var = tf.train.exponential_decay(
                             lr_var, step_var, learning_rate_n_decay_steps, learning_rate_decay,
@@ -720,17 +720,17 @@ class Trainer:
                 n_steps = multigpu_sync_steps
             else:
                 n_steps = 1
-                
+
             self._learning_rate = lr_var * n_steps
 
             _optimizer = tf.train.AdamOptimizer(lr_var)
-        
+
             with tf.name_scope('gradient-summing'):
                 all_grads = {}
                 for grad, var in itertools.chain(*self._towers_grads):
                     if grad is not None:
                         all_grads.setdefault(var, []).append(grad)
-                        
+
                 gradvars = []
                 for var, grads in all_grads.items():
                     with tf.device(var.device):
@@ -739,14 +739,14 @@ class Trainer:
                         else:
                             avg_grad = tf.add_n(grads)
                     gradvars.append((avg_grad, var))
-            
+
             apply_gradient_op = _optimizer.apply_gradients(gradvars, global_step=step_var)
 
             self._grads = gradvars
             self.train_op = apply_gradient_op
             self._step_var = step_var * n_steps
 
-            if self._update_ops:         
+            if self._update_ops:
                 self.train_op = tf.group(self.train_op, *self._update_ops)
 
     def _setup_metrics(self):
