@@ -41,7 +41,13 @@ class Trainer:
         **kwargs
             Arbitrary keyword arguments. These arguments override hparams.
         """
-        self.hparams = tf.contrib.training.HParams(hparams)
+        self.hparams = tf.contrib.training.HParams()
+
+        for key, value in hparams.values().keys():
+            if key in self.hparams:
+                self.hparams.set_hparam(key, value)
+            else:
+                self.hparams.add_hparam(key, value)
 
         for key, value in kwargs.items():
             if key in self.hparams:
