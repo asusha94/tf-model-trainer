@@ -403,10 +403,11 @@ class Trainer:
 
         graph = tf.Graph()
         with graph.as_default():
+            var_scope = tf.get_variable_scope() if self._var_scope is None else self._var_scope
             with tf.name_scope('model'):
                 inputs = input_getter()
                 model = self._model_getter()
-                with tf.variable_scope('model'):
+                with tf.variable_scope(var_scope):
                     if hasattr(model, 'inference') and callable(model.inference):
                         outputs = model.inference(*inputs)
                     else:
