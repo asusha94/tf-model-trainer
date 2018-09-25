@@ -502,8 +502,6 @@ class Trainer:
                 dataset = dataset_provider.get_dataset()
             else:
                 dataset_placeholders = dataset_provider.placeholders()
-                if not isinstance(dataset_placeholders, (tuple, list)):
-                    dataset_placeholders = (dataset_placeholders,)
 
                 if dataset_enable_caching and dataset_cache_dir_path is not None:
                     pipe_name_tf_phr = tf.placeholder(tf.string, name='pipe_name')
