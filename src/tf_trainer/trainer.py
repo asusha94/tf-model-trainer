@@ -43,7 +43,7 @@ class Trainer:
         """
         self.hparams = tf.contrib.training.HParams()
 
-        for key, value in hparams.values().keys():
+        for key, value in hparams.values().items():
             if key in self.hparams:
                 self.hparams.set_hparam(key, value)
             else:
