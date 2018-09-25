@@ -757,7 +757,7 @@ class Trainer:
         with tf.name_scope('metrics'):
             model = self._towers_models[0]
             with tf.device(self._get_device_setter(self._gpus[0]) if len(self._gpus) > 1 else None):
-                if hasattr(model, 'metrics') and callable(model, 'metrics'):
+                if hasattr(model, 'metrics') and callable(model.metrics):
                     metrics = model.metrics()
                 else:
                     metrics = self.metrics_getter(model)
