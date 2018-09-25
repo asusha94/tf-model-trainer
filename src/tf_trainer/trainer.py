@@ -167,7 +167,7 @@ class Trainer:
 
         return self
 
-    def set_model(self, model_getter):
+    def set_model(self, model_getter, var_scope='model'):
         '''
         Parameters
         ---------
@@ -179,6 +179,8 @@ class Trainer:
                     def loss(self, scope): pass
                     def gradients(self): pass
 
+        var_scope : str, optional
+            Forces to create a variable scope with a provided name
         Returns
         -------
         Trainer
@@ -198,6 +200,7 @@ class Trainer:
         else:
             self._model_getter = lambda: model_getter
 
+        self._var_scope = var_scope
         self._is_builded = False
 
         return self
@@ -634,7 +637,7 @@ class Trainer:
             else:
                 return scoped(None)
 
-        var_scope = 'model'
+        var_scope = tf.get_variable_scope() if self._var_scope is None else self._var_scope
         if len(self._gpus) > 1:
             for i, name in enumerate(self._gpus):
                 with tf.device(self._get_device_setter(name)):
