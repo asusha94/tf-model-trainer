@@ -273,6 +273,10 @@ class Trainer:
                 if self.pipe_name_tf_phr is not None:
                     train_iter_feed_dict[self.pipe_name_tf_phr] = 'train'
 
+                for k, v in train_iter_feed_dict.items():
+                    if len(v) == 0 and not isinstance(v, (bytes, str)):
+                        tf.logging.warning('Possible empty a training data source: `%r` = %r' % (k, v))
+                        
                 sess.run(self.train_iterator.initializer, train_iter_feed_dict)
 
                 valid_iter_feed_dict = dict()
@@ -282,7 +286,11 @@ class Trainer:
                         valid_iter_feed_dict.update(feed)
 
                 if self.pipe_name_tf_phr is not None:
-                    train_iter_feed_dict[self.pipe_name_tf_phr] = 'valid'
+                    valid_iter_feed_dict[self.pipe_name_tf_phr] = 'valid'
+                    
+                for k, v in valid_iter_feed_dict.items():
+                    if len(v) == 0 and not isinstance(v, (bytes, str)):
+                        tf.logging.warning('Possible empty a validation data source: `%r` = %r' % (k, v))
 
                 sess.run(self.valid_iterator.initializer, valid_iter_feed_dict)
 
@@ -420,7 +428,7 @@ class Trainer:
 
                 model_saver = tf.train.Saver(tf.trainable_variables())
 
-        with tf.Session(config=tf.ConfigProto(gpu_options=tf.GPUOptions(allow_growth=True)), graph=graph) as sess:
+        with tf.Session(config=tf.ConfigProto(allow_soft_placement=True, gpu_options=tf.GPUOptions(allow_growth=True)), graph=graph) as sess:
             sess.run(tf.global_variables_initializer())
 
             if outputs_names:
@@ -491,7 +499,7 @@ class Trainer:
         N_TRAINERS = max(1, len(self._gpus))
 
         batch_size = self.hparams.get('batch_size', 1)
-        buffer_size = self.hparams.get('buffer_size', batch_size)
+        buffer_size_factor = self.hparams.get('buffer_size_factor', 1)
         dataset_enable_caching = self.hparams.get('dataset_enable_caching', False)
         dataset_cache_dir_path = self.hparams.get('dataset_cache_dir_path', None)
         dataset_n_workers = self.hparams.get('dataset_n_workers', os.cpu_count())
@@ -530,7 +538,7 @@ class Trainer:
                 if needs_flatting:
                     dataset = dataset.flat_map(lambda *samples: tf.data.Dataset.from_tensor_slices(samples))
 
-                dataset = dataset.shuffle(buffer_size=buffer_size)
+                dataset = dataset.shuffle(buffer_size=int(buffer_size_factor*batch_size))
                 dataset = dataset.repeat()
 
                 if len(datasets) > 0:
@@ -544,6 +552,7 @@ class Trainer:
         else:
             dataset = tf.data.Dataset.from_tensor_slices(datasets)
             dataset = dataset.interleave(lambda d: d, cycle_length=len(datasets), block_length=1)
+            dataset = dataset.repeat()
 
         dataset = dataset.batch(batch_size=batch_size)
         dataset = dataset.prefetch(buffer_size=N_TRAINERS*(multigpu_sync_steps if N_TRAINERS > 1 else 1))
