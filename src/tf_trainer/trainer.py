@@ -414,7 +414,7 @@ class Trainer:
         graph = tf.Graph()
         with graph.as_default():
             var_scope = tf.get_variable_scope() if self._var_scope is None else self._var_scope
-            with tf.variable_scope(var_scope):
+            with tf.variable_scope(var_scope, auxiliary_name_scope=True):
                 inputs = input_getter()
                 if not isinstance(inputs, (tuple, list)):
                     inputs = [inputs]
@@ -667,16 +667,15 @@ class Trainer:
                 with tf.device(self._get_device_setter(name)):
                     result_set = []
                     for s in range(multigpu_sync_steps):
-                        with tf.variable_scope(var_scope, reuse=tf.AUTO_REUSE) as vs:
-                            with tf.name_scope(vs.original_name_scope):
-                                if multigpu_sync_steps == 1:
-                                    scope = tf.name_scope('tower-%i' % i)
-                                else:
-                                    scope = tf.name_scope('tower-%i-%i' % (i, s))
+                        with tf.variable_scope(var_scope, reuse=tf.AUTO_REUSE, auxiliary_name_scope=False) as vs:
+                            if multigpu_sync_steps == 1:
+                                scope = tf.name_scope('tower-%i' % i)
+                            else:
+                                scope = tf.name_scope('tower-%i-%i' % (i, s))
 
-                                result = build_model(scope, grads_factor=1./multigpu_sync_steps)
+                            result = build_model(scope, grads_factor=1./multigpu_sync_steps)
 
-                                result_set.append(result)
+                            result_set.append(result)
 
                     if len(result_set) == 1:
                         model, losses_, gradvars = result_set[0]
@@ -711,13 +710,12 @@ class Trainer:
                         self._update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS)
                         losses = losses_
         else:
-            with tf.variable_scope(var_scope) as vs:
-                with tf.name_scope(vs.original_name_scope):
-                    if len(self._gpus):
-                        with tf.device(self._get_device_setter(self._gpus[0])):
-                            model, losses, gradvars = build_model()
-                    else:
+            with tf.variable_scope(var_scope, auxiliary_name_scope=False):
+                if len(self._gpus):
+                    with tf.device(self._get_device_setter(self._gpus[0])):
                         model, losses, gradvars = build_model()
+                else:
+                    model, losses, gradvars = build_model()
 
                 self._towers_models.append(model)
                 self._towers_grads.append(gradvars)
