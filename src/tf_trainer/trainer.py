@@ -43,11 +43,12 @@ class Trainer:
         """
         self.hparams = tf.contrib.training.HParams()
 
-        for key, value in hparams.values().items():
-            if key in self.hparams:
-                self.hparams.set_hparam(key, value)
-            else:
-                self.hparams.add_hparam(key, value)
+        if hparams is not None:
+            for key, value in hparams.values().items():
+                if key in self.hparams:
+                    self.hparams.set_hparam(key, value)
+                else:
+                    self.hparams.add_hparam(key, value)
 
         for key, value in kwargs.items():
             if key in self.hparams:
@@ -420,11 +421,12 @@ class Trainer:
                     inputs = [inputs]
 
                 model = self._model_getter()
-                with tf.variable_scope(var_scope):
-                    if hasattr(model, 'inference') and callable(model.inference):
-                        outputs = model.inference(*inputs)
-                    else:
-                        outputs = model.forward(False, *inputs)
+                with tf.variable_scope(var_scope) as vs:
+                    with tf.name_scope(vs.original_name_scope):
+                        if hasattr(model, 'inference') and callable(model.inference):
+                            outputs = model.inference(*inputs)
+                        else:
+                            outputs = model.forward(False, *inputs)
 
                 if not isinstance(outputs, (tuple, list)):
                     outputs = [outputs]
@@ -668,15 +670,16 @@ class Trainer:
                 with tf.device(self._get_device_setter(name)):
                     result_set = []
                     for s in range(multigpu_sync_steps):
-                        with tf.variable_scope(var_scope, reuse=tf.AUTO_REUSE):
-                            if multigpu_sync_steps == 1:
-                                scope = tf.name_scope('tower-%i' % i)
-                            else:
-                                scope = tf.name_scope('tower-%i-%i' % (i, s))
+                        with tf.variable_scope(var_scope, reuse=tf.AUTO_REUSE) as vs:
+                            with tf.name_scope(vs.original_name_scope):
+                                if multigpu_sync_steps == 1:
+                                    scope = tf.name_scope('tower-%i' % i)
+                                else:
+                                    scope = tf.name_scope('tower-%i-%i' % (i, s))
 
-                            result = build_model(scope, grads_factor=1./multigpu_sync_steps)
+                                result = build_model(scope, grads_factor=1./multigpu_sync_steps)
 
-                            result_set.append(result)
+                                result_set.append(result)
 
                     if len(result_set) == 1:
                         model, losses_, gradvars = result_set[0]
@@ -711,12 +714,13 @@ class Trainer:
                         self._update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS)
                         losses = losses_
         else:
-            with tf.variable_scope(var_scope):
-                if len(self._gpus):
-                    with tf.device(self._get_device_setter(self._gpus[0])):
+            with tf.variable_scope(var_scope) as vs:
+                with tf.name_scope(vs.original_name_scope):
+                    if len(self._gpus):
+                        with tf.device(self._get_device_setter(self._gpus[0])):
+                            model, losses, gradvars = build_model()
+                    else:
                         model, losses, gradvars = build_model()
-                else:
-                    model, losses, gradvars = build_model()
 
                 self._towers_models.append(model)
                 self._towers_grads.append(gradvars)
