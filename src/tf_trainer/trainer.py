@@ -391,7 +391,7 @@ class Trainer:
 
     def freeze(self, input_getter, outputs_names=None,
                training_dir_path=None, ckpt_path=None, graph_protected_nodes=None,
-               verbose=False):
+               model_scope='model', verbose=False):
         """
         """
         if not input_getter:
@@ -414,16 +414,18 @@ class Trainer:
         graph = tf.Graph()
         with graph.as_default():
             var_scope = tf.get_variable_scope() if self._var_scope is None else self._var_scope
-            with tf.variable_scope(var_scope, auxiliary_name_scope=True):
-                inputs = input_getter()
-                if not isinstance(inputs, (tuple, list)):
-                    inputs = [inputs]
+            name_scope = graph.get_name_scope() if not model_scope else model_scope
+            with tf.variable_scope(var_scope, auxiliary_name_scope=False):
+                with tf.name_scope(name_scope):
+                    inputs = input_getter()
+                    if not isinstance(inputs, (tuple, list)):
+                        inputs = [inputs]
 
-                model = self._model_getter()
-                if hasattr(model, 'inference') and callable(model.inference):
-                    outputs = model.inference(*inputs)
-                else:
-                    outputs = model.forward(False, *inputs)
+                    model = self._model_getter()
+                    if hasattr(model, 'inference') and callable(model.inference):
+                        outputs = model.inference(*inputs)
+                    else:
+                        outputs = model.forward(False, *inputs)
 
                 if not isinstance(outputs, (tuple, list)):
                     outputs = [outputs]
