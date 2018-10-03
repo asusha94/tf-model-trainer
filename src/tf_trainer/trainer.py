@@ -389,7 +389,8 @@ class Trainer:
                         raise
 
     def freeze(self, input_getter, outputs_names=None,
-               training_dir_path=None, ckpt_path=None, graph_protected_nodes=None):
+               training_dir_path=None, ckpt_path=None, graph_protected_nodes=None,
+               model_scope='model', verbose=False):
         """
         """
         if not input_getter:
@@ -412,8 +413,12 @@ class Trainer:
         graph = tf.Graph()
         with graph.as_default():
             var_scope = tf.get_variable_scope() if self._var_scope is None else self._var_scope
-            with tf.name_scope('model'):
+            scope = graph.get_name_scope() if not model_scope else model_scope
+            with tf.name_scope(scope):
                 inputs = input_getter()
+                if not isinstance(inputs, (tuple, list)):
+                    inputs = [inputs]
+
                 model = self._model_getter()
                 with tf.variable_scope(var_scope):
                     if hasattr(model, 'inference') and callable(model.inference):
@@ -424,6 +429,15 @@ class Trainer:
                 if not isinstance(outputs, (tuple, list)):
                     outputs = [outputs]
 
+                if verbose:
+                    print('The model\'s inputs:')
+                    for inp in inputs:
+                        print(' ', inp.name)
+
+                    print('The model\'s outputs:')
+                    for output in outputs:
+                        print(' ', output.name)
+
                 tf.graph_util.remove_training_nodes(graph.as_graph_def(), graph_protected_nodes)
 
                 model_saver = tf.train.Saver(tf.trainable_variables())
@@ -432,7 +446,7 @@ class Trainer:
             sess.run(tf.global_variables_initializer())
 
             if outputs_names:
-                outputs = [sess.graph.get_tensor_by_name(item) for item in outputs_names]
+                outputs = [sess.graph.get_tensor_by_name(item if item.rfind(':') != -1 else item + ':0') for item in outputs_names]
 
             model_saver.restore(sess, ckpt.model_checkpoint_path)
 
@@ -445,8 +459,9 @@ class Trainer:
             with tf.gfile.GFile(os.path.join(training_dir_path, 'graph.frozen.pb'), "wb") as f:
                 f.write(output_graph_def.SerializeToString())
 
-            print('%d ops in the final graph.' % len(output_graph_def.node))
-            print('The frozen graph is stored in file: `%s`' % os.path.join(training_dir_path, 'graph.frozen.pb'))
+            if verbose:
+                print('%d ops in the final graph.' % len(output_graph_def.node))
+                print('The frozen graph is stored in file: `%s`' % os.path.join(training_dir_path, 'graph.frozen.pb'))
 
     #
     # private section
