@@ -391,7 +391,7 @@ class Trainer:
 
     def freeze(self, input_getter, outputs_names=None,
                training_dir_path=None, ckpt_path=None, graph_protected_nodes=None,
-               model_scope='model', verbose=False):
+               model_scope='model', frozen_name='graph.frozen', verbose=False):
         """
         """
         if not input_getter:
@@ -457,12 +457,12 @@ class Trainer:
                 [node.name.split(':')[0] for node in outputs]
             )
 
-            with tf.gfile.GFile(os.path.join(training_dir_path, 'graph.frozen.pb'), "wb") as f:
+            with tf.gfile.GFile(os.path.join(training_dir_path, '%s.pb' % frozen_name), "wb") as f:
                 f.write(output_graph_def.SerializeToString())
 
             if verbose:
                 print('%d ops in the final graph.' % len(output_graph_def.node))
-                print('The frozen graph is stored in file: `%s`' % os.path.join(training_dir_path, 'graph.frozen.pb'))
+                print('The frozen graph is stored in file: `%s`' % os.path.join(training_dir_path, '%s.pb' % frozen_name))
 
     #
     # private section
