@@ -441,7 +441,7 @@ class Trainer:
 
                 tf.graph_util.remove_training_nodes(graph.as_graph_def(), graph_protected_nodes)
 
-                model_saver = tf.train.Saver(tf.trainable_variables())
+                model_saver = tf.train.Saver(tf.global_variables())
 
         with tf.Session(config=tf.ConfigProto(allow_soft_placement=True, gpu_options=tf.GPUOptions(allow_growth=True)), graph=graph) as sess:
             sess.run(tf.global_variables_initializer())
