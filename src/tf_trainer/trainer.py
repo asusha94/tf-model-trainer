@@ -257,7 +257,7 @@ class Trainer:
 
         gpu_options = tf.GPUOptions(allow_growth=True,
                                     per_process_gpu_memory_fraction=gpu_memory_fraction)
-        with tf.Session(config=tf.ConfigProto(allow_soft_placement=True, gpu_options=gpu_options)) as sess:
+        with tf.Session(config=tf.ConfigProto(allow_soft_placement=True, inter_op_parallelism_threads=os.cpu_count(), gpu_options=gpu_options)) as sess:
             try:
                 if verbose:
                     print('Initializing parameters ', flush=True, end='')
@@ -586,7 +586,8 @@ class Trainer:
                 if callable(pad_shapes):
                     pad_shapes = pad_shapes()
 
-            pad_shapes = tuple([u if u is not None else s for u, s in zip(pad_shapes, dataset.output_shapes)])
+            pad_shapes = tuple([((u if isinstance(u, tf.TensorShape) else tf.TensorShape(u)) if u is not None else s)
+                                for u, s in zip(pad_shapes, dataset.output_shapes)])
 
             pad_values = None
             if hasattr(self._model_getter, 'pad_values'):
