@@ -554,8 +554,10 @@ class Trainer:
                 if needs_flatting:
                     dataset = dataset.flat_map(lambda *samples: tf.data.Dataset.from_tensor_slices(samples))
 
-                dataset = dataset.shuffle(buffer_size=int(buffer_size_factor*batch_size))
-                dataset = dataset.repeat()
+                dataset = dataset.shuffle(buffer_size=max(0, int(buffer_size_factor*batch_size)))
+
+                if any([s.ndims is None for s in dataset.output_shapes]):
+                    tf.logging.warning('The dataset (%s) has unknown shapes %s.' % (type(dataset), dataset.output_shapes))
 
                 if len(datasets) > 0:
                     assert datasets[-1].output_shapes == dataset.output_shapes and datasets[-1].output_types == dataset.output_types,\
@@ -568,9 +570,48 @@ class Trainer:
         else:
             dataset = tf.data.Dataset.from_tensor_slices(datasets)
             dataset = dataset.interleave(lambda d: d, cycle_length=len(datasets), block_length=1)
-            dataset = dataset.repeat()
+        
+        dataset = dataset.repeat()
 
-        dataset = dataset.batch(batch_size=batch_size)
+        padded_batch = hasattr(self._model_getter, 'padded_batch') and self._model_getter.padded_batch
+        if callable(padded_batch):
+            padded_batch = padded_batch()
+
+        if not padded_batch:
+            dataset = dataset.batch(batch_size=batch_size)
+        else:
+            pad_shapes = None
+            if hasattr(self._model_getter, 'pad_shapes'):
+                pad_shapes = self._model_getter.pad_shapes
+                if callable(pad_shapes):
+                    pad_shapes = pad_shapes()
+
+            pad_shapes = tuple([u if u is not None else s for u, s in zip(pad_shapes, dataset.output_shapes)])
+
+            pad_values = None
+            if hasattr(self._model_getter, 'pad_values'):
+                pad_values = self._model_getter.pad_values
+                if callable(pad_values):
+                    pad_values = pad_values()
+
+                if isinstance(pad_values, list):
+                    pad_values = tuple(pad_values)
+
+            pad_drop_remainder = hasattr(self._model_getter, 'pad_drop_remainder') and self._model_getter.pad_drop_remainder
+            if callable(pad_drop_remainder):
+                pad_drop_remainder = pad_drop_remainder()
+
+            if any([s.ndims is None for s in pad_shapes]):
+                tf.logging.warning('Padded shapes has unspecified values %s, batch selection will be without padding.' % pad_shapes)
+                dataset = dataset.batch(batch_size=batch_size)
+            elif isinstance(pad_values, tuple) and len(pad_values) != len(pad_shapes):
+                tf.logging.warning('Padding values aren\'t specified for all shapes (pad_shapes(%i) != pad_values(%i)), batch selection will be without padding.' % (len(pad_shapes), len(pad_values)))
+                dataset = dataset.batch(batch_size=batch_size)
+            else:
+                if isinstance(pad_values, tuple):
+                    pad_values = tuple([tf.cast(v, dtype=t) for v, t in zip(pad_values, dataset.output_types)])
+
+                dataset = dataset.padded_batch(batch_size=batch_size, padded_shapes=pad_shapes, padding_values=pad_values, drop_remainder=pad_drop_remainder)
         dataset = dataset.prefetch(buffer_size=N_TRAINERS*(multigpu_sync_steps if N_TRAINERS > 1 else 1))
 
         self.pipe_name_tf_phr = pipe_name_tf_phr
