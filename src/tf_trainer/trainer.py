@@ -430,14 +430,26 @@ class Trainer:
                 if not isinstance(outputs, (tuple, list)):
                     outputs = [outputs]
 
+                def flat_names(tensors):
+                    result = []
+                    for t in tensors:
+                        if isinstance(t, (tuple, list)):
+                            result = result + flat_names(t)
+                        else:
+                            result.append(t.name)
+                    return result
+                    
                 if verbose:
                     print('The model\'s inputs:')
-                    for inp in inputs:
-                        print(' ', inp.name)
+                    for name in flat_names(inputs):
+                        print(' ', name)
 
-                    print('The model\'s outputs:')
-                    for output in outputs:
-                        print(' ', output.name)
+                    print('The model\'s outputs:')                        
+                    for name in flat_names(outputs):
+                        print(' ', name)
+                
+                if not outputs_names:
+                    outputs_names = flat_names(outputs)
 
                 tf.graph_util.remove_training_nodes(graph.as_graph_def(), graph_protected_nodes)
 
@@ -446,8 +458,7 @@ class Trainer:
         with tf.Session(config=tf.ConfigProto(allow_soft_placement=True, gpu_options=tf.GPUOptions(allow_growth=True)), graph=graph) as sess:
             sess.run(tf.global_variables_initializer())
 
-            if outputs_names:
-                outputs = [sess.graph.get_tensor_by_name(item if item.rfind(':') != -1 else item + ':0') for item in outputs_names]
+            outputs = [sess.graph.get_tensor_by_name(item if item.rfind(':') != -1 else item + ':0') for item in outputs_names]
 
             model_saver.restore(sess, ckpt.model_checkpoint_path)
 
