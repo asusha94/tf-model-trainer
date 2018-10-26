@@ -6,9 +6,14 @@ import time
 import types
 import operator
 from .device_utils import get_available_gpus, local_device_setter
-
+from enum import Enum
 
 class Trainer:
+    class _DatasetType(Enum):
+        Manual = -1
+        TensorSlices = 0,
+        Generator = 1,
+
     def __init__(self, hparams=None, **kwargs):
         """Initializes a Trainer instance.
 
@@ -66,11 +71,7 @@ class Trainer:
     def add_dataset(self, *args):
         '''Adds a dataset for training.
 
-        1. ```add_dataset(
-                placeholders_getter,
-                feed_dict_getter
-                [, mapper=None[, needs_flatting=False]]
-            )```
+        1. `add_dataset(placeholders_getter, feed_dict_getter [, mapper=None[, needs_flatting=False]])`
 
         2. `add_dataset(dataset)`
 
@@ -98,6 +99,15 @@ class Trainer:
                     needs_flatting = bool()
 
                     def placeholders(self): pass
+                    def map_func(self): pass # optional
+                    def feed_dict(self, state): pass
+
+            or
+                
+                class Dataset:
+                    needs_flatting = bool()
+
+                    def generator(self): pass
                     def map_func(self): pass # optional
                     def feed_dict(self, state): pass
 
@@ -158,9 +168,11 @@ class Trainer:
                 raise ValueError('dataset: has not `feed_dict` method')
 
             if hasattr(dataset, 'placeholders'):
-                self._datasets.append((dataset, False))
+                self._datasets.append((dataset, self._DatasetType.TensorSlices))
+            elif hasattr(dataset, 'generator'):
+                self._datasets.append((dataset, self._DatasetType.Generator))
             elif hasattr(dataset, 'get_dataset'):
-                self._datasets.append((dataset, True))
+                self._datasets.append((dataset, self._DatasetType.Manual))
             else:
                 raise ValueError('dataset: has neither `placeholders` nor `get_dataset` methods')
 
@@ -236,8 +248,7 @@ class Trainer:
 
         return self
 
-    def train(self, model_initial_weights_loader=None,
-              verbose=False, training_dir_path=None, auto_freeze=None):
+    def train(self, verbose=False, training_dir_path=None, auto_freeze=None):
         self._build_graph()
 
         if training_dir_path is None:
@@ -302,12 +313,9 @@ class Trainer:
                     print('[Failed]', flush=True)
                 raise
 
-            if model_initial_weights_loader is not None:
-                model_initial_weights_loader(sess)
-            else:
-                model = self._towers_models[0]
-                if hasattr(model, 'preload_weights_op') and callable(model.preload_weights_op):
-                    model.preload_weights_op()(sess)
+            model = self._towers_models[0]
+            if hasattr(model, 'preload_weights_op') and callable(model.preload_weights_op):
+                model.preload_weights_op()(sess)
 
             ckpt = tf.train.get_checkpoint_state(training_dir_path)
             if allow_restoring and ckpt and tf.train.checkpoint_exists(ckpt.model_checkpoint_path):
@@ -536,18 +544,21 @@ class Trainer:
             dataset_cache_dir_path = dataset_cache_dir_path + '/'
 
         datasets = []
-        for i, (dataset_provider, provides_graph) in enumerate(self._datasets):
-            if provides_graph:
+        for i, (dataset_provider, dtype) in enumerate(self._datasets):
+            if dtype == self._DatasetType.Manual:
                 dataset = dataset_provider.get_dataset()
             else:
-                dataset_placeholders = dataset_provider.placeholders()
+                if dtype == self._DatasetType.TensorSlices:
+                    dataset_placeholders = dataset_provider.placeholders()
+                    dataset = tf.data.Dataset.from_tensor_slices(dataset_placeholders)
+                elif dtype == self._DatasetType.Generator:
+                    dataset_generator_args = dataset_provider.generator()
+                    dataset = tf.data.Dataset.from_generator(*dataset_generator_args)
 
                 if dataset_enable_caching and dataset_cache_dir_path is not None:
                     pipe_name_tf_phr = tf.placeholder(tf.string, name='pipe_name')
                 else:
                     pipe_name_tf_phr = None
-
-                dataset = tf.data.Dataset().from_tensor_slices(dataset_placeholders)
 
                 if hasattr(dataset_provider, 'map_func') and dataset_provider.map_func is not None:
                     dataset = dataset.map(dataset_provider.map_func, dataset_n_workers)
