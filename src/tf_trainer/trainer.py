@@ -8,6 +8,12 @@ import operator
 from .device_utils import get_available_gpus, local_device_setter
 from enum import Enum
 
+
+class DatasetIteratorNames:
+    Training = 'train'
+    Validation = 'valid'
+
+
 class Trainer:
     class _DatasetType(Enum):
         Manual = -1
@@ -164,10 +170,13 @@ class Trainer:
         else:
             dataset = args[0]
 
-            if not hasattr(dataset, 'feed_dict'):
-                raise ValueError('dataset: has not `feed_dict` method')
+            if isinstance(dataset, type):
+                dataset = dataset()
 
             if hasattr(dataset, 'placeholders'):
+                if not hasattr(dataset, 'feed_dict'):
+                    raise ValueError('dataset: has not `feed_dict` method')
+
                 self._datasets.append((dataset, self._DatasetType.TensorSlices))
             elif hasattr(dataset, 'generator'):
                 self._datasets.append((dataset, self._DatasetType.Generator))
@@ -278,31 +287,35 @@ class Trainer:
 
                 train_iter_feed_dict = dict()
                 for dataset, _ in self._datasets:
-                    feed = dataset.feed_dict('train')
+                    if not hasattr(dataset, 'feed_dict'):
+                        continue
+
+                    feed = dataset.feed_dict(DatasetIteratorNames.Training)
                     if feed:
                         train_iter_feed_dict.update(feed)
-
-                if self.pipe_name_tf_phr is not None:
-                    train_iter_feed_dict[self.pipe_name_tf_phr] = 'train'
 
                 for k, v in train_iter_feed_dict.items():
                     if len(v) == 0 and not isinstance(v, (bytes, str)):
                         tf.logging.warning('Possible empty a training data source: `%r` = %r' % (k, v))
                         
+                train_iter_feed_dict[self.dataset_iterator_name] = DatasetIteratorNames.Training
+
                 sess.run(self.train_iterator.initializer, train_iter_feed_dict)
 
                 valid_iter_feed_dict = dict()
                 for dataset, _ in self._datasets:
-                    feed = dataset.feed_dict('valid')
+                    if not hasattr(dataset, 'feed_dict'):
+                        continue
+
+                    feed = dataset.feed_dict(self.dataset_iterator_name)
                     if feed:
                         valid_iter_feed_dict.update(feed)
-
-                if self.pipe_name_tf_phr is not None:
-                    valid_iter_feed_dict[self.pipe_name_tf_phr] = 'valid'
                     
                 for k, v in valid_iter_feed_dict.items():
                     if len(v) == 0 and not isinstance(v, (bytes, str)):
                         tf.logging.warning('Possible empty a validation data source: `%r` = %r' % (k, v))
+
+                valid_iter_feed_dict[self.dataset_iterator_name] = DatasetIteratorNames.Validation
 
                 sess.run(self.valid_iterator.initializer, valid_iter_feed_dict)
 
@@ -543,6 +556,8 @@ class Trainer:
         if dataset_cache_dir_path and not dataset_cache_dir_path.endswith('/'):
             dataset_cache_dir_path = dataset_cache_dir_path + '/'
 
+        self.dataset_iterator_name = tf.placeholder(tf.string, name='iterator_name')
+
         datasets = []
         for i, (dataset_provider, dtype) in enumerate(self._datasets):
             if dtype == self._DatasetType.Manual:
@@ -553,22 +568,28 @@ class Trainer:
                     dataset = tf.data.Dataset.from_tensor_slices(dataset_placeholders)
                 elif dtype == self._DatasetType.Generator:
                     dataset_generator_args = dataset_provider.generator()
-                    dataset = tf.data.Dataset.from_generator(*dataset_generator_args)
+                    if not isinstance(dataset_generator_args, tuple):
+                        raise ValueError('Dataset `%s`: not return a tuple from `generator` method' % type(dataset_provider))
 
-                if dataset_enable_caching and dataset_cache_dir_path is not None:
-                    pipe_name_tf_phr = tf.placeholder(tf.string, name='pipe_name')
-                else:
-                    pipe_name_tf_phr = None
+                    if len(dataset_generator_args) < 2:
+                        raise ValueError('Dataset `%s`: a generator tuple must contain at least a generator method and a list of output types' % type(dataset_provider))
+
+                    args = [self.dataset_iterator_name]
+                    if len(dataset_generator_args) > 3:
+                        args = args + list(dataset_generator_args[3])
+                        dataset_generator_args = dataset_generator_args[:3]
+
+                    dataset = tf.data.Dataset.from_generator(*dataset_generator_args, args=tuple(args))
 
                 if hasattr(dataset_provider, 'map_func') and dataset_provider.map_func is not None:
                     dataset = dataset.map(dataset_provider.map_func, dataset_n_workers)
                     dataset = dataset.apply(tf.contrib.data.ignore_errors())
 
                 if dataset_enable_caching:
-                    if dataset_cache_dir_path is not None and pipe_name_tf_phr is not None:
+                    if dataset_cache_dir_path is not None:
                         if not os.path.exists(dataset_cache_dir_path):
                             os.makedirs(dataset_cache_dir_path)
-                        dataset = dataset.cache(tf.constant(dataset_cache_dir_path + ('data-%i-' % i)) + pipe_name_tf_phr)
+                        dataset = dataset.cache(tf.constant(dataset_cache_dir_path + ('data-%i-' % i)) + self.dataset_iterator_name)
                     else:
                         dataset = dataset.cache()
 
@@ -636,8 +657,6 @@ class Trainer:
 
                 dataset = dataset.padded_batch(batch_size=batch_size, padded_shapes=pad_shapes, padding_values=pad_values, drop_remainder=pad_drop_remainder)
         dataset = dataset.prefetch(buffer_size=N_TRAINERS*(multigpu_sync_steps if N_TRAINERS > 1 else 1))
-
-        self.pipe_name_tf_phr = pipe_name_tf_phr
 
         self.dataset = dataset
 
