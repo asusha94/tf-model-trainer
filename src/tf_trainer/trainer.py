@@ -307,7 +307,7 @@ class Trainer:
                     if not hasattr(dataset, 'feed_dict'):
                         continue
 
-                    feed = dataset.feed_dict(self.dataset_iterator_name)
+                    feed = dataset.feed_dict(DatasetIteratorNames.Validation)
                     if feed:
                         valid_iter_feed_dict.update(feed)
                     
