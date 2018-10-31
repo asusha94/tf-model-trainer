@@ -606,15 +606,25 @@ class Trainer:
                     assert datasets[-1].output_shapes == dataset.output_shapes and datasets[-1].output_types == dataset.output_types,\
                         'Datasets don\'t produce the same types of elements'
 
+            dataset = dataset.repeat()
+
             datasets.append(dataset)
 
         if len(datasets) == 1:
             dataset = datasets[0]
         else:
-            dataset = tf.data.Dataset.from_tensor_slices(datasets)
-            dataset = dataset.interleave(lambda d: d, cycle_length=len(datasets), block_length=1)
-        
-        dataset = dataset.repeat()
+            def concatenate(datasets):
+                if len(datasets) == 0:
+                    return None
+                else:
+                    d = tf.data.Dataset.from_tensors(datasets[0])
+                    o = concatenate(datasets[1:])
+                    if o is not None:
+                        d.concatenate(o)
+                    return d
+
+            dataset = tf.data.Dataset.zip(tuple(datasets))
+            dataset = dataset.flat_map(lambda *ds: concatenate(ds))
 
         padded_batch = hasattr(self._model_getter, 'padded_batch') and self._model_getter.padded_batch
         if callable(padded_batch):
