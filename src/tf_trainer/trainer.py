@@ -166,7 +166,7 @@ class Trainer:
                 def feed_dict(self, state):
                     return feed_dict_getter(state, *self._placeholders)
 
-            self._datasets.append((AnonymousDataset(), False))
+            self._datasets.append((AnonymousDataset(), self._DatasetType.TensorSlices))
         else:
             dataset = args[0]
 
@@ -620,7 +620,7 @@ class Trainer:
                     d = tf.data.Dataset.from_tensors(datasets[0])
                     o = concatenate(datasets[1:])
                     if o is not None:
-                        d.concatenate(o)
+                        d = d.concatenate(o)
                     return d
 
             dataset = tf.data.Dataset.zip(tuple(datasets))
