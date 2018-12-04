@@ -258,7 +258,7 @@ class Trainer:
 
         return self
 
-    def train(self, verbose=False, training_dir_path=None, auto_freeze=None):
+    def train(self, verbose=False, training_dir_path=None):
         self._build_graph()
 
         if training_dir_path is None:
@@ -271,28 +271,6 @@ class Trainer:
         allow_restoring = self.hparams.get('allow_restoring', True)
         gpu_memory_fraction = self.hparams.get('gpu_memory_fraction', 0.95)
 
-        if auto_freeze:
-            _auto_freeze_args = auto_freeze
-            _auto_freeze_args.update(dict(verbose=False))
-            def auto_freeze(suffix=None, silent=False):
-                try:
-                    if verbose and not silent:
-                        print('Freezing...',  flush=True, end='')
-
-                    self._freeze_suffix = suffix
-                    self.freeze(**_auto_freeze_args)
-
-                    if verbose and not silent:
-                        print('[OK]', flush=True)
-                except:
-                    if verbose and not silent:
-                        print('[Failed]', flush=True)
-                    raise
-                finally:
-                    self._freeze_suffix = None
-        else:
-            auto_freeze = None
-
         if not os.path.exists(training_dir_path):
             os.makedirs(training_dir_path)
 
@@ -300,7 +278,10 @@ class Trainer:
 
         gpu_options = tf.GPUOptions(allow_growth=True,
                                     per_process_gpu_memory_fraction=gpu_memory_fraction)
-        with tf.Session(config=tf.ConfigProto(allow_soft_placement=True, inter_op_parallelism_threads=os.cpu_count(), gpu_options=gpu_options)) as sess:
+        config = tf.ConfigProto(allow_soft_placement=True,
+                                inter_op_parallelism_threads=os.cpu_count(),
+                                gpu_options=gpu_options)
+        with tf.Session(config=config) as sess:
             try:
                 if verbose:
                     print('Initializing parameters ', flush=True, end='')
@@ -407,9 +388,6 @@ class Trainer:
 
                             self.saver.save(sess, checkpoint_path, global_step=_step)
 
-                            if auto_freeze:
-                                auto_freeze(_step, True)
-
                             if verbose:
                                 print('[OK]', flush=True)
                         except:
@@ -419,17 +397,22 @@ class Trainer:
 
                 if verbose:
                     print('Training process is finished.', flush=True)
+            except Exception as ex:
+                if verbose:
+                    import traceback
+                    traceback.print_exc()
+                raise
             finally:
                 self.saver.save(sess, checkpoint_path, global_step=_step)
                 tf.train.write_graph(sess.graph_def, training_dir_path, 'graph.pb', as_text=False)
-                if auto_freeze:
-                    auto_freeze()
 
     def freeze(self, input_getter, outputs_names=None,
                training_dir_path=None, ckpt_path=None, graph_protected_nodes=None,
                model_scope='model', frozen_name='graph.frozen', verbose=False):
         """
         """
+        session = None
+
         if not input_getter:
             raise ValueError('input_getter: is empty')
 
@@ -491,7 +474,7 @@ class Trainer:
 
                 model_saver = tf.train.Saver(tf.global_variables())
 
-        with tf.Session(config=tf.ConfigProto(allow_soft_placement=True, gpu_options=tf.GPUOptions(allow_growth=True)), graph=graph) as sess:
+        def freeze_op(sess):
             sess.run(tf.global_variables_initializer())
 
             outputs = [sess.graph.get_tensor_by_name(item if item.rfind(':') != -1 else item + ':0') for item in outputs_names]
@@ -515,6 +498,13 @@ class Trainer:
             if verbose:
                 print('%d ops in the final graph.' % len(output_graph_def.node))
                 print('The frozen graph is stored in file: `%s`' % os.path.join(training_dir_path, frozen_fname))
+
+        if session is not None:
+            pass
+        else:
+            config = tf.ConfigProto(allow_soft_placement=True, gpu_options=tf.GPUOptions(allow_growth=True))
+            with tf.Session(config=config, graph=graph) as sess:
+                freeze_op(sess)
 
     #
     # private section
