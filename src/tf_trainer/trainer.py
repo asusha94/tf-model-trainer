@@ -73,6 +73,7 @@ class Trainer:
         self._learning_rate_getter = None
 
         self._datasets = []
+        self._freeze_suffix = None
 
     def add_dataset(self, *args):
         '''Adds a dataset for training.
@@ -109,7 +110,7 @@ class Trainer:
                     def feed_dict(self, state): pass
 
             or
-                
+
                 class Dataset:
                     needs_flatting = bool()
 
@@ -270,6 +271,28 @@ class Trainer:
         allow_restoring = self.hparams.get('allow_restoring', True)
         gpu_memory_fraction = self.hparams.get('gpu_memory_fraction', 0.95)
 
+        if auto_freeze:
+            _auto_freeze_args = auto_freeze
+            _auto_freeze_args.update(dict(verbose=False))
+            def auto_freeze(suffix=None, silent=False):
+                try:
+                    if verbose and not silent:
+                        print('Freezing...',  flush=True, end='')
+
+                    self._freeze_suffix = suffix
+                    self.freeze(**_auto_freeze_args)
+
+                    if verbose and not silent:
+                        print('[OK]', flush=True)
+                except:
+                    if verbose and not silent:
+                        print('[Failed]', flush=True)
+                    raise
+                finally:
+                    self._freeze_suffix = None
+        else:
+            auto_freeze = None
+
         if not os.path.exists(training_dir_path):
             os.makedirs(training_dir_path)
 
@@ -297,7 +320,7 @@ class Trainer:
                 for k, v in train_iter_feed_dict.items():
                     if len(v) == 0 and not isinstance(v, (bytes, str)):
                         tf.logging.warning('Possible empty a training data source: `%r` = %r' % (k, v))
-                        
+
                 train_iter_feed_dict[self.dataset_iterator_name] = DatasetIteratorNames.Training
 
                 sess.run(self.train_iterator.initializer, train_iter_feed_dict)
@@ -310,7 +333,7 @@ class Trainer:
                     feed = dataset.feed_dict(DatasetIteratorNames.Validation)
                     if feed:
                         valid_iter_feed_dict.update(feed)
-                    
+
                 for k, v in valid_iter_feed_dict.items():
                     if len(v) == 0 and not isinstance(v, (bytes, str)):
                         tf.logging.warning('Possible empty a validation data source: `%r` = %r' % (k, v))
@@ -384,6 +407,9 @@ class Trainer:
 
                             self.saver.save(sess, checkpoint_path, global_step=_step)
 
+                            if auto_freeze:
+                                auto_freeze(_step, True)
+
                             if verbose:
                                 print('[OK]', flush=True)
                         except:
@@ -397,18 +423,7 @@ class Trainer:
                 self.saver.save(sess, checkpoint_path, global_step=_step)
                 tf.train.write_graph(sess.graph_def, training_dir_path, 'graph.pb', as_text=False)
                 if auto_freeze:
-                    try:
-                        if verbose:
-                            print('Freezing...',  flush=True, end='')
-
-                        self.freeze(**auto_freeze)
-
-                        if verbose:
-                            print('[OK]', flush=True)
-                    except:
-                        if verbose:
-                            print('[Failed]', flush=True)
-                        raise
+                    auto_freeze()
 
     def freeze(self, input_getter, outputs_names=None,
                training_dir_path=None, ckpt_path=None, graph_protected_nodes=None,
@@ -459,16 +474,16 @@ class Trainer:
                         else:
                             result.append(t.name)
                     return result
-                    
+
                 if verbose:
                     print('The model\'s inputs:')
                     for name in flat_names(inputs):
                         print(' ', name)
 
-                    print('The model\'s outputs:')                        
+                    print('The model\'s outputs:')
                     for name in flat_names(outputs):
                         print(' ', name)
-                
+
                 if not outputs_names:
                     outputs_names = flat_names(outputs)
 
@@ -489,12 +504,17 @@ class Trainer:
                 [node.name.split(':')[0] for node in outputs]
             )
 
-            with tf.gfile.GFile(os.path.join(training_dir_path, '%s.pb' % frozen_name), "wb") as f:
+            if self._freeze_suffix is None:
+                frozen_fname = '%s.pb' % frozen_name
+            else:
+                frozen_fname = '%s-%s.pb' % (frozen_name, str(self._freeze_suffix))
+
+            with tf.gfile.GFile(os.path.join(training_dir_path, frozen_fname), "wb") as f:
                 f.write(output_graph_def.SerializeToString())
 
             if verbose:
                 print('%d ops in the final graph.' % len(output_graph_def.node))
-                print('The frozen graph is stored in file: `%s`' % os.path.join(training_dir_path, '%s.pb' % frozen_name))
+                print('The frozen graph is stored in file: `%s`' % os.path.join(training_dir_path, frozen_fname))
 
     #
     # private section
@@ -583,7 +603,9 @@ class Trainer:
 
                 if hasattr(dataset_provider, 'map_func') and dataset_provider.map_func is not None:
                     dataset = dataset.map(dataset_provider.map_func, dataset_n_workers)
-                    dataset = dataset.apply(tf.contrib.data.ignore_errors())
+
+                    if hasattr(dataset_provider, 'ignore_errors') and dataset_provider.ignore_errors:
+                        dataset = dataset.apply(tf.contrib.data.ignore_errors())
 
                 if dataset_enable_caching:
                     if dataset_cache_dir_path is not None:
