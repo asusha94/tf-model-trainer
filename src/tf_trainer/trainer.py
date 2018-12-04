@@ -328,6 +328,10 @@ class Trainer:
             except:
                 if verbose:
                     print('[Failed]', flush=True)
+
+                    import traceback
+                    traceback.print_exc()
+
                 raise
 
             model = self._towers_models[0]
@@ -397,7 +401,7 @@ class Trainer:
 
                 if verbose:
                     print('Training process is finished.', flush=True)
-            except Exception as ex:
+            except:
                 if verbose:
                     import traceback
                     traceback.print_exc()
