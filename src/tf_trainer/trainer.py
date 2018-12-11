@@ -299,8 +299,11 @@ class Trainer:
                         train_iter_feed_dict.update(feed)
 
                 for k, v in train_iter_feed_dict.items():
-                    if len(v) == 0 and not isinstance(v, (bytes, str)):
-                        tf.logging.warning('Possible empty a training data source: `%r` = %r' % (k, v))
+                    try:
+                        if len(v) == 0 and not isinstance(v, (bytes, str)):
+                            tf.logging.warning('Possible empty a training data source: `%r` = %r' % (k, v))
+                    except:
+                        pass
 
                 train_iter_feed_dict[self.dataset_iterator_name] = DatasetIteratorNames.Training
 
@@ -316,8 +319,11 @@ class Trainer:
                         valid_iter_feed_dict.update(feed)
 
                 for k, v in valid_iter_feed_dict.items():
-                    if len(v) == 0 and not isinstance(v, (bytes, str)):
-                        tf.logging.warning('Possible empty a validation data source: `%r` = %r' % (k, v))
+                    try:
+                        if len(v) == 0 and not isinstance(v, (bytes, str)):
+                            tf.logging.warning('Possible empty a validation data source: `%r` = %r' % (k, v))
+                    except:
+                        pass
 
                 valid_iter_feed_dict[self.dataset_iterator_name] = DatasetIteratorNames.Validation
 
