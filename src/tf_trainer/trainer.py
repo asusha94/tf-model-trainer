@@ -48,6 +48,8 @@ class Trainer:
                 'learning_rate_decay' : if it's values is set, it enables learning rate decay (default: None).
                 'learning_rate_n_decay_steps' : the number of steps to apply decay factor (default: 1000)
                 'learning_rate_decay_staircase' : whether learning rate decaying should look like stairs (default: False).
+                'optimizer' : sets an optimizer (Adam|SGD|Momentum)
+                'optimizer_params' : a dict of parameters to be passed to an instance of optimizer
 
         **kwargs
             Arbitrary keyword arguments. These arguments override hparams.
@@ -71,6 +73,7 @@ class Trainer:
         self.saver = None
 
         self._learning_rate_getter = None
+        self._optimizer_getter = None
 
         self._datasets = []
         self._freeze_suffix = None
@@ -233,6 +236,12 @@ class Trainer:
             raise ValueError('learning_rate_getter: is not callable')
 
         self._learning_rate_getter = learning_rate_getter
+
+    def set_custom_optimizer(self, optimizer_getter):
+        if not callable(optimizer_getter):
+            raise ValueError('optimizer_getter: is not callable')
+
+        self._optimizer_getter = optimizer_getter
 
     def set_metrics(self, metrics_getter):
         '''
@@ -871,7 +880,19 @@ class Trainer:
 
             self._learning_rate = lr_var * n_steps
 
-            _optimizer = tf.train.AdamOptimizer(lr_var)
+            if self._optimizer_getter is not None:
+                _optimizer = self._optimizer_getter(self._learning_rate)
+            else:
+                opt_params = self.hparams.get('optimizer_params', dict())
+                opt_code = str(self.hparams.get('optimizer', 'adam')).lower()
+                if opt_code in ['adam']:
+                    _optimizer = tf.train.AdamOptimizer(lr_var, **opt_params)
+                elif opt_code in ['moment', 'momentum']:
+                    _optimizer = tf.train.MomentumOptimizer(lr_var, **opt_params)
+                elif opt_code in ['sgd', 'gd', 'gradiendescent', 'stochasticgradiendescent']:
+                    _optimizer = tf.train.GradientDescentOptimizer(lr_var, **opt_params)
+                else:
+                    raise ValueError('Unsupported optimizer was set')
 
             with tf.name_scope('gradient-summing'):
                 all_grads = {}
