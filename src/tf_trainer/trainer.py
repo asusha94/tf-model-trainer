@@ -372,6 +372,8 @@ class Trainer:
                     _valid_loss, _valid_summary = sess.run([self.total_loss, self.valid_summary_op], {self.data_loader_mode: 'valid-pipe'})
                     _train_summary_writer.add_summary(_train_summary, _step)
                     _valid_summary_writer.add_summary(_valid_summary, _step)
+                    _train_summary_writer.flush()
+                    _valid_summary_writer.flush()
 
                     if verbose:
                         print('Initial train loss = %.6f, valid loss = %.6f.' % (_train_loss, _valid_loss), flush=True)
@@ -394,6 +396,8 @@ class Trainer:
                         _train_summary_writer.add_summary(_train_summary, _step)
                         _train_summary_writer.add_run_metadata(run_metadata, 'train-op-%i' % _step, _step)
                         _valid_summary_writer.add_summary(_valid_summary, _step)
+                        _train_summary_writer.flush()
+                        _valid_summary_writer.flush()
 
                         if verbose:
                             elapsed = time.time() - start
@@ -491,14 +495,23 @@ class Trainer:
 
                 tf.graph_util.remove_training_nodes(graph.as_graph_def(), graph_protected_nodes)
 
-                model_saver = tf.train.Saver(tf.global_variables())
+                #model_saver = tf.train.Saver(tf.global_variables())
 
         def freeze_op(sess):
             sess.run(tf.global_variables_initializer())
 
             outputs = [sess.graph.get_tensor_by_name(item if item.rfind(':') != -1 else item + ':0') for item in outputs_names]
 
-            model_saver.restore(sess, ckpt.model_checkpoint_path)
+            previous_variables = [var_name for var_name, _ in tf.contrib.framework.list_variables(ckpt.model_checkpoint_path)]
+
+            for variable in tf.global_variables():
+                if variable.op.name in previous_variables:
+                    var = tf.contrib.framework.load_variable(ckpt.model_checkpoint_path, variable.op.name)
+                    tf.add_to_collection('assignOps', variable.assign(tf.cast(var, variable.dtype)))
+
+            sess.run(tf.get_collection('assignOps'))
+
+            # model_saver.restore(sess, ckpt.model_checkpoint_path)
 
             output_graph_def = tf.graph_util.convert_variables_to_constants(
                 sess,
@@ -760,7 +773,7 @@ class Trainer:
                         tf_grad_clip_value_min = tf.constant(grad_clip_value_min, dtype=tf.float32)
                         tf_grad_clip_value_max = tf.constant(grad_clip_value_max, dtype=tf.float32)
                         gradvars = [
-                            ((tf.clip_by_value(grad, tf_grad_clip_value_min, tf_grad_clip_value_max)
+                            ((tf.clip_by_value(grad, tf.cast(tf_grad_clip_value_min, grad.dtype), tf.cast(tf_grad_clip_value_max, grad.dtype))
                             if grad is not None else grad), var)
                             for grad, var in gradvars
                         ]
@@ -769,7 +782,7 @@ class Trainer:
                     with tf.name_scope('grads-norm-clipping'):
                         tf_grad_clip_norm = tf.constant(grad_clip_norm, dtype=tf.float32)
                         gradvars = [
-                            ((tf.clip_by_norm(grad, tf_grad_clip_norm)
+                            ((tf.clip_by_norm(grad, tf.cast(tf_grad_clip_norm, grad.dtype))
                             if grad is not None else grad), var)
                             for grad, var in gradvars
                         ]
@@ -777,7 +790,7 @@ class Trainer:
                 if len(self._gpus) > 1:
                     with tf.name_scope('grads-division-for-avg'):
                         multiplier = tf.constant(grads_factor / len(self._gpus), dtype=tf.float32)
-                        gradvars = [((tf.multiply(grad, multiplier) if grad is not None else grad), var) for grad, var in gradvars]
+                        gradvars = [((tf.multiply(grad, tf.cast(multiplier, grad.dtype)) if grad is not None else grad), var) for grad, var in gradvars]
 
                 return model, losses, gradvars
 
