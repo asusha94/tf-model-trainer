@@ -528,7 +528,9 @@ class Trainer:
                 f.write(output_graph_def.SerializeToString())
 
             if verbose:
+                flops = tf.profiler.profile(sess.graph, options=tf.profiler.ProfileOptionBuilder.float_operation())
                 print('%d ops in the final graph.' % len(output_graph_def.node))
+                print('%d flops in the final graph.' % flops.total_float_ops)
                 print('The frozen graph is stored in file: `%s`' % os.path.join(training_dir_path, frozen_fname))
 
         if session is not None:
