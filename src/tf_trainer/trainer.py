@@ -358,7 +358,10 @@ class Trainer:
 
             ckpt = tf.train.get_checkpoint_state(training_dir_path)
             if allow_restoring and ckpt and tf.train.checkpoint_exists(ckpt.model_checkpoint_path):
-                self.saver.restore(sess, ckpt.model_checkpoint_path)
+                try:
+                    self.saver.restore(sess, ckpt.model_checkpoint_path)
+                except:
+                    self.param_saver.restore(sess, ckpt.model_checkpoint_path)
             else:
                 shutil.rmtree(training_dir_path)
                 self.saver.save(sess, checkpoint_path)
@@ -568,6 +571,7 @@ class Trainer:
                     self._setup_train_op()
 
                     self.saver = tf.train.Saver(tf.global_variables())
+                    self.param_saver = tf.train.Saver(tf.trainable_variables())
 
                     self._setup_metrics()
 
