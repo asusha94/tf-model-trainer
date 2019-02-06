@@ -322,7 +322,7 @@ class Trainer:
                 sess.run(self.train_iterator.initializer, train_iter_feed_dict)
 
                 valid_iter_feed_dict = dict()
-                for dataset, _ in self._datasets:
+                for dataset, _, _ in self._datasets:
                     if not hasattr(dataset, 'feed_dict'):
                         continue
 
