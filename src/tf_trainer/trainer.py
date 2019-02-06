@@ -656,7 +656,7 @@ class Trainer:
                     tf.logging.warning('The dataset (%s) has unknown shapes %s.' % (type(dataset), dataset.output_shapes))
 
                 if len(datasets) > 0:
-                    assert datasets[-1].output_shapes == dataset.output_shapes and datasets[-1].output_types == dataset.output_types,\
+                    assert datasets[-1][0].output_shapes == dataset.output_shapes and datasets[-1][0].output_types == dataset.output_types,\
                         'Datasets don\'t produce the same types of elements'
 
             dataset = dataset.repeat()
