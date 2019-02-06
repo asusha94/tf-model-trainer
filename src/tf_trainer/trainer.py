@@ -676,6 +676,7 @@ class Trainer:
 
             weights_sum = sum(weights)
             weights = [int(round((w / weights_sum) / 0.05)) for w in weights]
+            n_total = sum(weights)
 
             datasets_weighted = []
             for dataset, repeats in zip(datasets, weights):
@@ -684,7 +685,7 @@ class Trainer:
 
             dataset = tf.data.Dataset.zip(tuple(datasets_weighted))
             dataset = dataset.flat_map(lambda *ds: concatenate(ds))
-            dataset = dataset.shuffle(buffer_size=max(0, int(buffer_size_factor*batch_size)))
+            dataset = dataset.shuffle(buffer_size=max(0, int(n_total*batch_size)))
 
         padded_batch = hasattr(self._model_getter, 'padded_batch') and self._model_getter.padded_batch
         if callable(padded_batch):
