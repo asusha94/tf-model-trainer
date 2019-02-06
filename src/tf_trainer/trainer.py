@@ -670,7 +670,7 @@ class Trainer:
                 if len(datasets) == 0:
                     return None
                 else:
-                    d = tf.data.Dataset.from_sparse_tensor_slices(datasets[0])
+                    d = tf.data.Dataset.from_tensors(datasets[0])
                     o = concatenate(datasets[1:])
                     if o is not None:
                         d = d.concatenate(o)
@@ -689,6 +689,7 @@ class Trainer:
 
             dataset = tf.data.Dataset.zip(tuple(datasets_weighted))
             dataset = dataset.flat_map(lambda *ds: concatenate(ds))
+            dataset = dataset.flat_map(lambda *samples: tf.data.Dataset.from_tensor_slices(samples))
             dataset = dataset.shuffle(buffer_size=max(0, int(n_total*batch_size)))
 
         padded_batch = hasattr(self._model_getter, 'padded_batch') and self._model_getter.padded_batch
