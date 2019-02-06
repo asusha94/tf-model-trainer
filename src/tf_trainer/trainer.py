@@ -670,7 +670,7 @@ class Trainer:
                 if len(datasets) == 0:
                     return None
                 else:
-                    d = tf.data.Dataset.from_tensors(datasets[0])
+                    d = tf.data.Dataset.from_sparse_tensor_slices(datasets[0])
                     o = concatenate(datasets[1:])
                     if o is not None:
                         d = d.concatenate(o)
@@ -685,7 +685,7 @@ class Trainer:
             datasets_weighted = []
             for dataset, repeats in zip(datasets, weights):
                 if repeats > 0:
-                    datasets_weighted = datasets_weighted + [dataset] * repeats
+                    datasets_weighted = datasets_weighted + [dataset.batch(repeats)]
 
             dataset = tf.data.Dataset.zip(tuple(datasets_weighted))
             dataset = dataset.flat_map(lambda *ds: concatenate(ds))
