@@ -1,4 +1,5 @@
 import itertools
+import math
 import os
 import shutil
 import tensorflow as tf
@@ -78,7 +79,7 @@ class Trainer:
         self._datasets = []
         self._freeze_suffix = None
 
-    def add_dataset(self, *args):
+    def add_dataset(self, *args, **kwargs):
         '''Adds a dataset for training.
 
         1. `add_dataset(placeholders_getter, feed_dict_getter [, mapper=None[, needs_flatting=False]])`
@@ -135,6 +136,8 @@ class Trainer:
         if len(args) == 0:
             raise ValueError('No inputs provided.')
 
+        weight = max(0., kwargs.get('weight', 1.))
+
         if len(args) > 1:
             placeholders_getter = args[0]
             feed_dict_getter = args[1]
@@ -170,7 +173,7 @@ class Trainer:
                 def feed_dict(self, state):
                     return feed_dict_getter(state, *self._placeholders)
 
-            self._datasets.append((AnonymousDataset(), self._DatasetType.TensorSlices))
+            self._datasets.append((AnonymousDataset(), self._DatasetType.TensorSlices, weight))
         else:
             dataset = args[0]
 
@@ -181,11 +184,11 @@ class Trainer:
                 if not hasattr(dataset, 'feed_dict'):
                     raise ValueError('dataset: has not `feed_dict` method')
 
-                self._datasets.append((dataset, self._DatasetType.TensorSlices))
+                self._datasets.append((dataset, self._DatasetType.TensorSlices, weight))
             elif hasattr(dataset, 'generator'):
-                self._datasets.append((dataset, self._DatasetType.Generator))
+                self._datasets.append((dataset, self._DatasetType.Generator, weight))
             elif hasattr(dataset, 'get_dataset'):
-                self._datasets.append((dataset, self._DatasetType.Manual))
+                self._datasets.append((dataset, self._DatasetType.Manual, weight))
             else:
                 raise ValueError('dataset: has neither `placeholders` nor `get_dataset` methods')
 
@@ -299,7 +302,7 @@ class Trainer:
                 sess.run(self._init_locals_op)
 
                 train_iter_feed_dict = dict()
-                for dataset, _ in self._datasets:
+                for dataset, _, _ in self._datasets:
                     if not hasattr(dataset, 'feed_dict'):
                         continue
 
@@ -603,7 +606,7 @@ class Trainer:
         self.dataset_iterator_name = tf.placeholder(tf.string, name='iterator_name')
 
         datasets = []
-        for i, (dataset_provider, dtype) in enumerate(self._datasets):
+        for i, (dataset_provider, dtype, weight) in enumerate(self._datasets):
             if dtype == self._DatasetType.Manual:
                 dataset = dataset_provider.get_dataset()
             else:
@@ -654,10 +657,10 @@ class Trainer:
 
             dataset = dataset.repeat()
 
-            datasets.append(dataset)
+            datasets.append((dataset, weight))
 
         if len(datasets) == 1:
-            dataset = datasets[0]
+            dataset, _ = datasets[0]
         else:
             def concatenate(datasets):
                 if len(datasets) == 0:
@@ -669,8 +672,19 @@ class Trainer:
                         d = d.concatenate(o)
                     return d
 
-            dataset = tf.data.Dataset.zip(tuple(datasets))
+            datasets, weights = zip(*datasets)
+
+            weights_sum = sum(weights)
+            weights = [int(round((w / weights_sum) / 0.05)) for w in weights]
+
+            datasets_weighted = []
+            for dataset, repeats in zip(datasets, weights):
+                if repeats > 0:
+                    datasets_weighted = datasets_weighted + [dataset] * repeats
+
+            dataset = tf.data.Dataset.zip(tuple(datasets_weighted))
             dataset = dataset.flat_map(lambda *ds: concatenate(ds))
+            dataset = dataset.shuffle(buffer_size=max(0, int(buffer_size_factor*batch_size)))
 
         padded_batch = hasattr(self._model_getter, 'padded_batch') and self._model_getter.padded_batch
         if callable(padded_batch):
