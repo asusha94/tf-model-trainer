@@ -270,7 +270,7 @@ class Trainer:
 
         return self
 
-    def train(self, verbose=False, training_dir_path=None):
+    def train(self, verbose=False, training_dir_path=None, profile=False):
         self._build_graph()
 
         if training_dir_path is None:
@@ -293,6 +293,10 @@ class Trainer:
         config = tf.ConfigProto(allow_soft_placement=True,
                                 inter_op_parallelism_threads=os.cpu_count(),
                                 gpu_options=gpu_options)
+
+        if profile:
+            run_metadata = tf.RunMetadata()
+
         with tf.Session(config=config) as sess:
             try:
                 if verbose:
@@ -391,8 +395,10 @@ class Trainer:
                     start = time.time()
 
                 for _ in range(_step, n_training_steps):
-                    run_metadata = tf.RunMetadata()
-                    sess.run(self.train_op, {self.is_training_mode: True, self.data_loader_mode: 'train-pipe'}, run_metadata=run_metadata)
+                    if profile:
+                        sess.run(self.train_op, {self.is_training_mode: True, self.data_loader_mode: 'train-pipe'}, options=tf.RunOptions(trace_level=tf.RunOptions.FULL_TRACE), run_metadata=run_metadata)
+                    else:
+                        sess.run(self.train_op, {self.is_training_mode: True, self.data_loader_mode: 'train-pipe'})
 
                     _step = int(sess.run(self._step_var))
 
@@ -400,7 +406,8 @@ class Trainer:
                         _train_loss, _train_summary = sess.run([self.total_loss, self.train_summary_op], {self.data_loader_mode: 'train-pipe'})
                         _valid_loss, _valid_summary = sess.run([self.total_loss, self.valid_summary_op], {self.data_loader_mode: 'valid-pipe'})
                         _train_summary_writer.add_summary(_train_summary, _step)
-                        _train_summary_writer.add_run_metadata(run_metadata, 'train-op-%i' % _step, _step)
+                        if profile:
+                            _train_summary_writer.add_run_metadata(run_metadata, 'train-op-%i' % _step, _step)
                         _valid_summary_writer.add_summary(_valid_summary, _step)
                         _train_summary_writer.flush()
                         _valid_summary_writer.flush()
@@ -434,6 +441,8 @@ class Trainer:
             finally:
                 self.saver.save(sess, checkpoint_path, global_step=_step)
                 tf.train.write_graph(sess.graph_def, training_dir_path, 'graph.pb', as_text=False)
+                if profile:
+                    tf.profiler.advise(sess.graph, run_metadata)
 
     def freeze(self, input_getter, outputs_names=None,
                training_dir_path=None, ckpt_path=None, graph_protected_nodes=None,
