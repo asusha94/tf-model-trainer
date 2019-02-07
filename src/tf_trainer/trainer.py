@@ -611,6 +611,7 @@ class Trainer:
 
         datasets = []
         for i, (dataset_provider, dtype, weight) in enumerate(self._datasets):
+            dataset_n_workers_this = max(1, dataset_n_workers // len(self._datasets))
             if dtype == self._DatasetType.Manual:
                 dataset = dataset_provider.get_dataset()
             else:
@@ -633,10 +634,11 @@ class Trainer:
                     dataset = tf.data.Dataset.from_generator(*dataset_generator_args, args=tuple(args))
 
                 if hasattr(dataset_provider, 'map_func') and dataset_provider.map_func is not None:
-                    dataset = dataset.map(dataset_provider.map_func, dataset_n_workers)
+                    dataset = dataset.prefetch(dataset_n_workers_this + 1)
+                    dataset = dataset.map(dataset_provider.map_func, dataset_n_workers_this)
 
                     if hasattr(dataset_provider, 'ignore_errors') and dataset_provider.ignore_errors:
-                        dataset = dataset.apply(tf.contrib.data.ignore_errors())
+                        dataset = dataset.apply(tf.data.experimental.ignore_errors())
 
                 if dataset_enable_caching:
                     if dataset_cache_dir_path is not None:
@@ -648,9 +650,8 @@ class Trainer:
 
                 needs_flatting = hasattr(dataset_provider, 'needs_flatting') and dataset_provider.needs_flatting
                 if needs_flatting:
-                    dataset = dataset.flat_map(lambda *samples: tf.data.Dataset.from_tensor_slices(samples))
-
-                dataset = dataset.shuffle(buffer_size=max(0, int(buffer_size_factor*batch_size)))
+                    dataset = dataset.apply(tf.data.experimental.parallel_interleave(
+                        lambda *samples: tf.data.Dataset.from_tensor_slices(samples), cycle_length=1))
 
                 if any([s.ndims is None for s in dataset.output_shapes]):
                     tf.logging.warning('The dataset (%s) has unknown shapes %s.' % (type(dataset), dataset.output_shapes))
@@ -685,12 +686,14 @@ class Trainer:
             datasets_weighted = []
             for dataset, repeats in zip(datasets, weights):
                 if repeats > 0:
-                    datasets_weighted = datasets_weighted + [dataset.batch(repeats)]
+                    datasets_weighted = datasets_weighted + [dataset.batch(repeats).prefetch(1)]
 
             dataset = tf.data.Dataset.zip(tuple(datasets_weighted))
-            dataset = dataset.flat_map(lambda *ds: concatenate(ds))
-            dataset = dataset.flat_map(lambda *samples: tf.data.Dataset.from_tensor_slices(samples))
-            dataset = dataset.shuffle(buffer_size=max(0, int(n_total*batch_size)))
+            dataset = dataset.apply(tf.data.experimental.parallel_interleave(lambda *ds: concatenate(ds), cycle_length=1))
+            dataset = dataset.apply(tf.data.experimental.parallel_interleave(lambda *samples: tf.data.Dataset.from_tensor_slices(samples), cycle_length=1))
+            dataset = dataset.shuffle(buffer_size=max(0, int(n_total*buffer_size_factor)))
+
+        dataset = dataset.shuffle(buffer_size=max(0, int(buffer_size_factor*batch_size)))
 
         padded_batch = hasattr(self._model_getter, 'padded_batch') and self._model_getter.padded_batch
         if callable(padded_batch):
@@ -732,7 +735,8 @@ class Trainer:
                     pad_values = tuple([tf.cast(v, dtype=t) for v, t in zip(pad_values, dataset.output_types)])
 
                 dataset = dataset.padded_batch(batch_size=batch_size, padded_shapes=pad_shapes, padding_values=pad_values, drop_remainder=pad_drop_remainder)
-        dataset = dataset.prefetch(buffer_size=N_TRAINERS*(multigpu_sync_steps if N_TRAINERS > 1 else 1))
+
+        dataset = dataset.prefetch(buffer_size=(N_TRAINERS*(multigpu_sync_steps if N_TRAINERS > 1 else 1) + 1))
 
         self.dataset = dataset
 
