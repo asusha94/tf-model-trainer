@@ -955,12 +955,12 @@ class Trainer:
                                 with tf.name_scope('clip-by-value'):
                                     tf_grad_clip_value_min = tf.constant(grad_clip_value_min, dtype=avg_grad.dtype)
                                     tf_grad_clip_value_max = tf.constant(grad_clip_value_max, dtype=avg_grad.dtype)
-                                    avg_grad = tf.clip_by_value(grad, tf_grad_clip_value_min, tf_grad_clip_value_max)
+                                    avg_grad = tf.clip_by_value(avg_grad, tf_grad_clip_value_min, tf_grad_clip_value_max)
 
                             if grad_clip_norm is not None:
                                 with tf.name_scope('clip-by-norm'):
                                     tf_grad_clip_norm = tf.constant(grad_clip_norm, dtype=avg_grad.dtype)
-                                    avg_grad = tf.clip_by_norm(grad, tf_grad_clip_norm)
+                                    avg_grad = tf.clip_by_norm(avg_grad, tf_grad_clip_norm)
 
                     gradvars.append((avg_grad, var))
 
