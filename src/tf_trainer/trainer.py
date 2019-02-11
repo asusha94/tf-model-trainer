@@ -51,6 +51,7 @@ class Trainer:
                 'learning_rate_decay_staircase' : whether learning rate decaying should look like stairs (default: False).
                 'optimizer' : sets an optimizer (Adam|SGD|Momentum)
                 'optimizer_params' : a dict of parameters to be passed to an instance of optimizer
+                'use_nccl': a flag
 
         **kwargs
             Arbitrary keyword arguments. These arguments override hparams.
@@ -770,12 +771,7 @@ class Trainer:
         self._towers_models = []
         self._towers_grads = []
 
-        grad_clip_value = self.hparams.get('grad_clip_value', None)
-
-        grad_clip_norm = self.hparams.get('grad_clip_norm', None)
-        if grad_clip_norm is not None:
-            grad_clip_norm = float(grad_clip_norm)
-
+        use_nccl = self.hparams.get('use_nccl', False)
         multigpu_sync_steps = max(1, self.hparams.get('multigpu_sync_steps', 1))
 
         def build_model(scope=None, grads_factor=1.):
@@ -797,31 +793,6 @@ class Trainer:
 
                 gradvars = model.gradients()
 
-                if grad_clip_value is not None:
-                    if isinstance(grad_clip_value, (list, tuple)):
-                        grad_clip_value_min, grad_clip_value_max = grad_clip_value
-                    else:
-                        grad_clip_value_min = -float(grad_clip_value)
-                        grad_clip_value_max = float(grad_clip_value)
-
-                    with tf.name_scope('grads-value-clipping'):
-                        tf_grad_clip_value_min = tf.constant(grad_clip_value_min, dtype=tf.float32)
-                        tf_grad_clip_value_max = tf.constant(grad_clip_value_max, dtype=tf.float32)
-                        gradvars = [
-                            ((tf.clip_by_value(grad, tf.cast(tf_grad_clip_value_min, grad.dtype), tf.cast(tf_grad_clip_value_max, grad.dtype))
-                            if grad is not None else grad), var)
-                            for grad, var in gradvars
-                        ]
-
-                if grad_clip_norm is not None:
-                    with tf.name_scope('grads-norm-clipping'):
-                        tf_grad_clip_norm = tf.constant(grad_clip_norm, dtype=tf.float32)
-                        gradvars = [
-                            ((tf.clip_by_norm(grad, tf.cast(tf_grad_clip_norm, grad.dtype))
-                            if grad is not None else grad), var)
-                            for grad, var in gradvars
-                        ]
-
                 if len(self._gpus) > 1:
                     with tf.name_scope('grads-division-for-avg'):
                         multiplier = tf.constant(grads_factor / len(self._gpus), dtype=tf.float32)
@@ -841,7 +812,7 @@ class Trainer:
                 with tf.device(self._get_device_setter(name)):
                     result_set = []
                     for s in range(multigpu_sync_steps):
-                        with tf.variable_scope(var_scope, reuse=tf.AUTO_REUSE, auxiliary_name_scope=False) as vs:
+                        with tf.variable_scope(var_scope, reuse=tf.AUTO_REUSE, auxiliary_name_scope=False):
                             if multigpu_sync_steps == 1:
                                 scope = tf.name_scope('tower-%i' % i)
                             else:
@@ -873,7 +844,10 @@ class Trainer:
                                     avg_grad = tf.add_n(grads)
 
                                 with tf.device(var.device):
-                                    avg_grad = tf.identity(avg_grad)
+                                    if use_nccl:
+                                        avg_grad = tf.contrib.nccl.broadcast(avg_grad)
+                                    else:
+                                        avg_grad = tf.identity(avg_grad)
 
                                 gradvars.append((avg_grad, var))
 
@@ -899,7 +873,21 @@ class Trainer:
         self.total_loss = tf.add_n(losses)
 
     def _setup_train_op(self):
+        use_nccl = self.hparams.get('use_nccl', False)
         multigpu_sync_steps = max(1, self.hparams.get('multigpu_sync_steps', 1))
+
+        grad_clip_value = self.hparams.get('grad_clip_value', None)
+
+        if grad_clip_value is not None:
+            if isinstance(grad_clip_value, (list, tuple)):
+                grad_clip_value_min, grad_clip_value_max = grad_clip_value
+            else:
+                grad_clip_value_min = -float(grad_clip_value)
+                grad_clip_value_max = float(grad_clip_value)
+
+        grad_clip_norm = self.hparams.get('grad_clip_norm', None)
+        if grad_clip_norm is not None:
+            grad_clip_norm = float(grad_clip_norm)
 
         step_var = tf.Variable(0, trainable=False)
 
@@ -942,7 +930,10 @@ class Trainer:
                 else:
                     raise ValueError('Unsupported optimizer was set')
 
-            with tf.name_scope('gradient-summing'):
+            def norm_var_name(name):
+                return name[:-2].replace('/', '-')
+
+            with tf.name_scope('gradients'):
                 all_grads = {}
                 for grad, var in itertools.chain(*self._towers_grads):
                     if grad is not None:
@@ -950,11 +941,27 @@ class Trainer:
 
                 gradvars = []
                 for var, grads in all_grads.items():
-                    with tf.device(var.device):
-                        if len(grads) == 1:
-                            avg_grad = tf.identity(grads[0])
-                        else:
-                            avg_grad = tf.add_n(grads)
+                    with tf.name_scope('grad-' + norm_var_name(var.name)):
+                        with tf.device(var.device):
+                            if len(grads) == 1:
+                                avg_grad = tf.identity(grads[0])
+                            else:
+                                if use_nccl:
+                                    avg_grad = tf.contrib.nccl.reduce_sum(grads)
+                                else:
+                                    avg_grad = tf.add_n(grads)
+
+                            if grad_clip_value is not None:
+                                with tf.name_scope('clip-by-value'):
+                                    tf_grad_clip_value_min = tf.constant(grad_clip_value_min, dtype=avg_grad.dtype)
+                                    tf_grad_clip_value_max = tf.constant(grad_clip_value_max, dtype=avg_grad.dtype)
+                                    avg_grad = tf.clip_by_value(grad, tf_grad_clip_value_min, tf_grad_clip_value_max)
+
+                            if grad_clip_norm is not None:
+                                with tf.name_scope('clip-by-norm'):
+                                    tf_grad_clip_norm = tf.constant(grad_clip_norm, dtype=avg_grad.dtype)
+                                    avg_grad = tf.clip_by_norm(grad, tf_grad_clip_norm)
+
                     gradvars.append((avg_grad, var))
 
             apply_gradient_op = _optimizer.apply_gradients(gradvars, global_step=step_var)
