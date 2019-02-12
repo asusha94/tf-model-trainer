@@ -15,11 +15,358 @@ class DatasetIteratorNames:
     Validation = 'valid'
 
 
+class Dataset:
+    class _DatasetType(Enum):
+        Manual = -1
+        TensorSlices = 0
+        Generator = 1
+
+    def __init__(self, **kwargs):
+        '''
+        kwargs:
+            'batch_size' : specifies a batch size.
+            'buffer_size_factor' : specifies a buffer size factor which is multiplied on a batch size for shuffle op.
+            'enable_caching' : allows dataset's tensors caching (default: False).
+            'cache_dir_path' : the path to a directory where the cache will be placed (default: None).
+            'n_workers' : the number of workers used in dataset's map functions (default: the number of cores).
+            'prefetch_size': the number of batches to be prefetched.
+        '''
+        self._params = kwargs.copy()
+        self._datasets = []
+        self._compiled = False
+        self._iterators = dict()
+
+    def add_source(self, *args, **kwargs):
+        '''Adds a dataset for training.
+
+        1. `add_dataset(placeholders_getter, feed_dict_getter [, mapper=None[, needs_flatting=False]])`
+
+        2. `add_dataset(dataset)`
+
+        Parameters
+        ---------
+        placeholders_getter
+            a function which provides a tuple of placeholders to form a `tf.data.Dataset` instance.
+
+        feed_dict_getter
+            a function which provides a dictionary to be feed with the placeholders as a keys.
+            this function must have the following signature:
+
+                def feed_dict_getter(state, *placeholders): pass
+
+        mapper : optional
+            a function which is used in `tf.data.Dataset.map`
+
+        needs_flatting : bool, optional
+            specifies whether to flat `mapper` results with `tf.data.Dataset.flat_map`
+
+        dataset : object
+            an instance of a class which implements one of the following interfaces:
+
+                class Dataset:
+                    needs_flatting = bool()
+
+                    def placeholders(self): pass
+                    def map_func(self): pass # optional
+                    def feed_dict(self, state): pass
+
+            or
+
+                class Dataset:
+                    needs_flatting = bool()
+
+                    def generator(self): pass
+                    def map_func(self): pass # optional
+                    def feed_dict(self, state): pass
+
+            or
+
+                class Dataset:
+                    def get_dataset(self): pass
+                    def feed_dict(self, state): pass
+
+        Notes
+        -----
+        The `state` parameter can have only the following values: { 'train', 'valid' }
+
+        '''
+        if self._compiled:
+            raise RuntimeError('Dataset is already compiled')
+
+        if len(args) == 0:
+            raise ValueError('No inputs provided.')
+
+        weight = max(0., kwargs.get('weight', 1.))
+
+        if len(args) > 1:
+            placeholders_getter = args[0]
+            feed_dict_getter = args[1]
+            dataset_mapper = args[2] if len(args) > 2 else None
+            needs_flatting = args[3] if len(args) > 3 else False
+
+            if not callable(placeholders_getter):
+                raise ValueError('placeholders_getter: is not callable')
+
+            if not callable(feed_dict_getter):
+                raise ValueError('feed_dict_getter: is not callable')
+
+            if dataset_mapper is not None and not callable(dataset_mapper):
+                raise ValueError('dataset_mapper: is not callable')
+
+            class AnonymousDataset:
+                def __init__(self):
+                    self.needs_flatting = needs_flatting
+                    self._placeholders = None
+
+                    if dataset_mapper is not None:
+                        self.map_func = self._map_func
+
+                def placeholders(self):
+                    if self._placeholders is None:
+                        self._placeholders = placeholders_getter()
+                    return self._placeholders
+
+                def _map_func(self, *args):
+                    if dataset_mapper is not None:
+                        return dataset_mapper(*args)
+
+                def feed_dict(self, state):
+                    return feed_dict_getter(state, *self._placeholders)
+
+            self._datasets.append((AnonymousDataset(), self._DatasetType.TensorSlices, weight))
+        else:
+            dataset = args[0]
+
+            if isinstance(dataset, type):
+                dataset = dataset()
+
+            if hasattr(dataset, 'placeholders'):
+                if not hasattr(dataset, 'feed_dict'):
+                    raise ValueError('dataset: has not `feed_dict` method')
+
+                self._datasets.append((dataset, self._DatasetType.TensorSlices, weight))
+            elif hasattr(dataset, 'generator'):
+                self._datasets.append((dataset, self._DatasetType.Generator, weight))
+            elif hasattr(dataset, 'get_dataset'):
+                self._datasets.append((dataset, self._DatasetType.Manual, weight))
+            else:
+                raise ValueError('dataset: has neither `placeholders` nor `get_dataset` methods')
+
+        return self
+
+    def compile(self, graph=None, scope=None, **kwargs):
+        if self._compiled:
+            raise RuntimeError('Dataset is already compiled')
+
+        if graph is None:
+            graph = tf.get_default_graph()
+
+        if kwargs:
+            params = self._params.copy()
+            params.update(kwargs)
+        else:
+            params = self._params
+
+        with graph.as_default():
+            with tf.name_scope(scope, 'dataset'):
+                self._setup_dataset(params)
+                self._compiled = True
+
+    def _setup_dataset(self, params):
+        if not len(self._datasets):
+            raise ValueError('No inputs souces were secified.')
+
+        batch_size = params.get('batch_size', 1)
+        buffer_size_factor = params.get('buffer_size_factor', 1)
+        dataset_enable_caching = params.get('enable_caching', False)
+        dataset_cache_dir_path = params.get('cache_dir_path', None)
+        dataset_n_workers = params.get('n_workers', os.cpu_count())
+        prefetch_size = max(1, params.get('prefetch_size', 1))
+
+        padded_batch = params.get('padded_batch', None)
+        pad_shapes = params.get('pad_shapes', None)
+        pad_values = params.get('pad_values', None)
+        pad_drop_remainder = params.get('pad_drop_remainder', None)
+
+        if dataset_cache_dir_path and not dataset_cache_dir_path.endswith('/'):
+            dataset_cache_dir_path = dataset_cache_dir_path + '/'
+
+        self._dataset_iterator_name = tf.placeholder(tf.string, name='iterator_name')
+
+        datasets = []
+        for i, (dataset_provider, dtype, weight) in enumerate(self._datasets):
+            dataset_n_workers_this = max(1, dataset_n_workers // len(self._datasets))
+            if dtype == self._DatasetType.Manual:
+                dataset = dataset_provider.get_dataset()
+            else:
+                if dtype == self._DatasetType.TensorSlices:
+                    dataset_placeholders = dataset_provider.placeholders()
+                    dataset = tf.data.Dataset.from_tensor_slices(dataset_placeholders)
+                elif dtype == self._DatasetType.Generator:
+                    dataset_generator_args = dataset_provider.generator()
+                    if not isinstance(dataset_generator_args, tuple):
+                        raise ValueError('Dataset `%s`: not return a tuple from `generator` method' % type(dataset_provider))
+
+                    if len(dataset_generator_args) < 2:
+                        raise ValueError('Dataset `%s`: a generator tuple must contain at least a generator method and a list of output types' % type(dataset_provider))
+
+                    args = [self._dataset_iterator_name]
+                    if len(dataset_generator_args) > 3:
+                        args = args + list(dataset_generator_args[3])
+                        dataset_generator_args = dataset_generator_args[:3]
+
+                    dataset = tf.data.Dataset.from_generator(*dataset_generator_args, args=tuple(args))
+
+                if hasattr(dataset_provider, 'map_func') and dataset_provider.map_func is not None:
+                    dataset = dataset.prefetch(dataset_n_workers_this + 1)
+                    dataset = dataset.map(dataset_provider.map_func, dataset_n_workers_this)
+
+                    if hasattr(dataset_provider, 'ignore_errors') and dataset_provider.ignore_errors:
+                        dataset = dataset.apply(tf.data.experimental.ignore_errors())
+
+                if dataset_enable_caching:
+                    if dataset_cache_dir_path is not None:
+                        if not os.path.exists(dataset_cache_dir_path):
+                            os.makedirs(dataset_cache_dir_path)
+                        dataset = dataset.cache(tf.constant(dataset_cache_dir_path + ('data-%i-' % i)) + self._dataset_iterator_name)
+                    else:
+                        dataset = dataset.cache()
+
+                needs_flatting = hasattr(dataset_provider, 'needs_flatting') and dataset_provider.needs_flatting
+                if needs_flatting:
+                    dataset = dataset.apply(tf.data.experimental.parallel_interleave(
+                        lambda *samples: tf.data.Dataset.from_tensor_slices(samples), cycle_length=1))
+
+                if any([s.ndims is None for s in dataset.output_shapes]):
+                    tf.logging.warning('The dataset (%s) has unknown shapes %s.' % (type(dataset), dataset.output_shapes))
+
+                if len(datasets) > 0:
+                    assert datasets[-1][0].output_types == dataset.output_types,\
+                        'Datasets don\'t produce the same types of elements'
+                    assert datasets[-1][0].output_shapes == dataset.output_shapes,\
+                        'Datasets don\'t produce the same shapes of elements'
+
+            dataset = dataset.repeat()
+
+            datasets.append((dataset, weight))
+
+        if len(datasets) == 1:
+            dataset, _ = datasets[0]
+        else:
+            def concatenate(datasets):
+                if len(datasets) == 0:
+                    return None
+                else:
+                    d = tf.data.Dataset.from_tensors(datasets[0])
+                    o = concatenate(datasets[1:])
+                    if o is not None:
+                        d = d.concatenate(o)
+                    return d
+
+            datasets, weights = zip(*datasets)
+
+            weights_sum = sum(weights)
+            weights = [int(round((w / weights_sum) / 0.05)) for w in weights]
+            n_total = sum(weights)
+
+            datasets_weighted = []
+            for dataset, repeats in zip(datasets, weights):
+                if repeats > 0:
+                    datasets_weighted = datasets_weighted + [dataset.batch(repeats).prefetch(1)]
+
+            dataset = tf.data.Dataset.zip(tuple(datasets_weighted))
+            dataset = dataset.apply(tf.data.experimental.parallel_interleave(lambda *ds: concatenate(ds), cycle_length=1))
+            dataset = dataset.apply(tf.data.experimental.parallel_interleave(lambda *samples: tf.data.Dataset.from_tensor_slices(samples), cycle_length=1))
+            dataset = dataset.shuffle(buffer_size=max(0, int(n_total*buffer_size_factor)))
+
+        dataset = dataset.shuffle(buffer_size=max(0, int(buffer_size_factor*batch_size)))
+
+        if callable(padded_batch):
+            padded_batch = padded_batch()
+
+        if not padded_batch:
+            dataset = dataset.batch(batch_size=batch_size)
+        else:
+            if callable(pad_shapes):
+                pad_shapes = pad_shapes()
+
+            pad_shapes = tuple([((u if isinstance(u, tf.TensorShape) else tf.TensorShape(u)) if u is not None else s)
+                                for u, s in zip(pad_shapes, dataset.output_shapes)])
+
+            if callable(pad_values):
+                pad_values = pad_values()
+
+            if isinstance(pad_values, list):
+                pad_values = tuple(pad_values)
+
+            if callable(pad_drop_remainder):
+                pad_drop_remainder = pad_drop_remainder()
+
+            if any([s.ndims is None for s in pad_shapes]):
+                tf.logging.warning('Padded shapes has unspecified values %s, batch selection will be without padding.' % pad_shapes)
+                dataset = dataset.batch(batch_size=batch_size)
+            elif isinstance(pad_values, tuple) and len(pad_values) != len(pad_shapes):
+                tf.logging.warning('Padding values aren\'t specified for all shapes (pad_shapes(%i) != pad_values(%i)), batch selection will be without padding.' % (len(pad_shapes), len(pad_values)))
+                dataset = dataset.batch(batch_size=batch_size)
+            else:
+                if isinstance(pad_values, tuple):
+                    pad_values = tuple([tf.cast(v, dtype=t) for v, t in zip(pad_values, dataset.output_types)])
+
+                dataset = dataset.padded_batch(batch_size=batch_size, padded_shapes=pad_shapes, padding_values=pad_values, drop_remainder=pad_drop_remainder)
+
+        dataset = dataset.prefetch(buffer_size=prefetch_size)
+
+        self.dataset = dataset
+
+        self._train_iterator = dataset.make_initializable_iterator('train')
+        self._valid_iterator = dataset.make_initializable_iterator('valid')
+
+        self._train_batch = self._train_iterator.get_next
+        self._valid_batch = self._valid_iterator.get_next
+
+    def outputs(self, pipe, name=None):
+        if pipe not in [DatasetIteratorNames.Training, DatasetIteratorNames.Validation]:
+            raise ValueError('Unsupported pipe: %r' % pipe)
+
+        if pipe not in self._iterators:
+            if isinstance(pipe, str):
+                name = pipe
+
+            iterator = self.dataset.make_initializable_iterator(name)
+            self._iterators[pipe] = (iterator, name)
+
+        iterator = self._iterators[pipe][0]
+        return iterator
+
+
+    def init(self, session):
+        for pipe, (iterator, _) in self._iterators.items():
+            feed_dict = dict()
+            for dataset, _, _ in self._datasets:
+                if not hasattr(dataset, 'feed_dict'):
+                    continue
+
+                feed = dataset.feed_dict(pipe)
+                if feed:
+                    feed_dict.update(feed)
+
+            for k, v in feed_dict.items():
+                try:
+                    if len(v) == 0 and not isinstance(v, (bytes, str)):
+                        tf.logging.warning('Possible empty a training data source: `%r` = %r' % (k, v))
+                except:
+                    pass
+
+            feed_dict[self._dataset_iterator_name] = pipe
+
+            session.run(iterator.initializer, feed_dict)
+
+
 class Trainer:
     class _DatasetType(Enum):
         Manual = -1
-        TensorSlices = 0,
-        Generator = 1,
+        TensorSlices = 0
+        Generator = 1
 
     def __init__(self, hparams=None, **kwargs):
         """Initializes a Trainer instance.

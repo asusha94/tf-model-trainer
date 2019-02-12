@@ -1,3 +1,5 @@
+from tf_trainer.summary import add_grads_summary
+from tf_trainer import ModelBuilder, Trainer, Dataset, DatasetIteratorNames
 import tensorflow as tf
 from tensorflow.examples.tutorials.mnist import input_data
 
@@ -7,9 +9,6 @@ import sys
 path = os.path.dirname(__file__)
 
 sys.path = [os.path.join(path, '..', 'src')] + sys.path
-
-from tf_trainer import ModelBuilder, Trainer
-from tf_trainer.summary import add_grads_summary
 
 
 mnist = input_data.read_data_sets("training/data/mnist/", one_hot=False)
@@ -78,10 +77,10 @@ def summary(model, step, learning_rate, grads, metrics):
 
 
 def feed_dict(state, inputs, labels):
-    if state == 'train':
-        return { inputs: mnist.train.images, labels: mnist.train.labels }
-    elif state == 'valid':
-        return { inputs: mnist.validation.images, labels: mnist.validation.labels }
+    if state == DatasetIteratorNames.Training:
+        return {inputs: mnist.train.images, labels: mnist.train.labels}
+    elif state == DatasetIteratorNames.Validation:
+        return {inputs: mnist.validation.images, labels: mnist.validation.labels}
 
 
 model = ModelBuilder() \
@@ -97,6 +96,24 @@ trainer_options = dict(
 )
 
 if __name__ == '__main__':
+    dataset = Dataset(batch_size=8).add_source(lambda: (tf.placeholder(tf.float32, [None, 784], "images"),
+                                                        tf.placeholder(tf.int32, [None], "labels")),
+                                               feed_dict)
+    dataset.compile()
+
+    train_batch = dataset.outputs(DatasetIteratorNames.Training).get_next()
+    valid_batch = dataset.outputs(DatasetIteratorNames.Validation).get_next()
+
+    with tf.Session() as sess:
+        sess.run(tf.global_variables_initializer())
+        dataset.init(sess)
+
+        b = sess.run(train_batch)
+        print('train', len(b), b[0].shape)
+
+        b = sess.run(valid_batch)
+        print('valid', len(b), b[0].shape)
+
     Trainer(**trainer_options) \
         .add_dataset(lambda: (tf.placeholder(tf.float32, [None, 784], "images"),
                               tf.placeholder(tf.int32, [None], "labels")),
