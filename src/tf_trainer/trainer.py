@@ -928,7 +928,7 @@ class Trainer:
                     self._setup_train_op()
 
                     self.saver = tf.train.Saver(tf.global_variables())
-                    self.param_saver = tf.train.Saver(tf.trainable_variables())
+                    self.param_saver = tf.train.Saver(list(tf.trainable_variables()) + [self._step_var_i])
 
                     self._setup_metrics()
 
@@ -1318,6 +1318,7 @@ class Trainer:
             self._grads = gradvars
             self.train_op = apply_gradient_op
             self._step_var = step_var * n_steps
+            self._step_var_i = step_var
 
             if self._update_ops:
                 self.train_op = tf.group(self.train_op, *self._update_ops)
