@@ -9,6 +9,11 @@ import operator
 from .device_utils import get_available_gpus, local_device_setter
 from enum import Enum
 
+if not hasattr(tf.data, 'experimental'):
+    tfdata = tf.contrib.data
+else:
+    tfdata = tf.data.experimental
+
 
 class DatasetIteratorNames:
     Training = 'train'
@@ -222,7 +227,7 @@ class Dataset:
                     dataset = dataset.map(dataset_provider.map_func, dataset_n_workers_this)
 
                     if hasattr(dataset_provider, 'ignore_errors') and dataset_provider.ignore_errors:
-                        dataset = dataset.apply(tf.data.experimental.ignore_errors())
+                        dataset = dataset.apply(tfdata.ignore_errors())
 
                 if dataset_enable_caching:
                     if dataset_cache_dir_path is not None:
@@ -234,7 +239,7 @@ class Dataset:
 
                 needs_flatting = hasattr(dataset_provider, 'needs_flatting') and dataset_provider.needs_flatting
                 if needs_flatting:
-                    dataset = dataset.apply(tf.data.experimental.parallel_interleave(
+                    dataset = dataset.apply(tfdata.parallel_interleave(
                         lambda *samples: tf.data.Dataset.from_tensor_slices(samples), cycle_length=1))
 
                 if any([s.ndims is None for s in dataset.output_shapes]):
@@ -275,8 +280,8 @@ class Dataset:
                     datasets_weighted = datasets_weighted + [dataset.batch(repeats).prefetch(1)]
 
             dataset = tf.data.Dataset.zip(tuple(datasets_weighted))
-            dataset = dataset.apply(tf.data.experimental.parallel_interleave(lambda *ds: concatenate(ds), cycle_length=1))
-            dataset = dataset.apply(tf.data.experimental.parallel_interleave(lambda *samples: tf.data.Dataset.from_tensor_slices(samples), cycle_length=1))
+            dataset = dataset.apply(tfdata.parallel_interleave(lambda *ds: concatenate(ds), cycle_length=1))
+            dataset = dataset.apply(tfdata.parallel_interleave(lambda *samples: tf.data.Dataset.from_tensor_slices(samples), cycle_length=1))
             dataset = dataset.shuffle(buffer_size=max(0, int(n_total*buffer_size_factor)))
 
         dataset = dataset.shuffle(buffer_size=max(0, int(buffer_size_factor*batch_size)))
@@ -995,7 +1000,7 @@ class Trainer:
                     dataset = dataset.map(dataset_provider.map_func, dataset_n_workers_this)
 
                     if hasattr(dataset_provider, 'ignore_errors') and dataset_provider.ignore_errors:
-                        dataset = dataset.apply(tf.data.experimental.ignore_errors())
+                        dataset = dataset.apply(tfdata.ignore_errors())
 
                 if dataset_enable_caching:
                     if dataset_cache_dir_path is not None:
@@ -1007,7 +1012,7 @@ class Trainer:
 
                 needs_flatting = hasattr(dataset_provider, 'needs_flatting') and dataset_provider.needs_flatting
                 if needs_flatting:
-                    dataset = dataset.apply(tf.data.experimental.parallel_interleave(
+                    dataset = dataset.apply(tfdata.parallel_interleave(
                         lambda *samples: tf.data.Dataset.from_tensor_slices(samples), cycle_length=1))
 
                 if any([s.ndims is None for s in dataset.output_shapes]):
@@ -1048,8 +1053,8 @@ class Trainer:
                     datasets_weighted = datasets_weighted + [dataset.batch(repeats).prefetch(1)]
 
             dataset = tf.data.Dataset.zip(tuple(datasets_weighted))
-            dataset = dataset.apply(tf.data.experimental.parallel_interleave(lambda *ds: concatenate(ds), cycle_length=1))
-            dataset = dataset.apply(tf.data.experimental.parallel_interleave(lambda *samples: tf.data.Dataset.from_tensor_slices(samples), cycle_length=1))
+            dataset = dataset.apply(tfdata.parallel_interleave(lambda *ds: concatenate(ds), cycle_length=1))
+            dataset = dataset.apply(tfdata.parallel_interleave(lambda *samples: tf.data.Dataset.from_tensor_slices(samples), cycle_length=1))
             dataset = dataset.shuffle(buffer_size=max(0, int(n_total*buffer_size_factor)))
 
         dataset = dataset.shuffle(buffer_size=max(0, int(buffer_size_factor*batch_size)))
