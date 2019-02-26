@@ -623,7 +623,7 @@ class Trainer:
 
         return self
 
-    def train(self, verbose=False, training_dir_path=None, profile=False):
+    def train(self, verbose=False, training_dir_path=None, profile=False, add_numeric_check=False):
         self._build_graph()
 
         if training_dir_path is None:
@@ -649,6 +649,11 @@ class Trainer:
 
         if profile:
             run_metadata = tf.RunMetadata()
+
+        if add_numeric_check:
+            check_op = tf.add_check_numerics_ops()
+        else:
+            check_op = None
 
         with tf.Session(config=config) as sess:
             try:
@@ -747,11 +752,15 @@ class Trainer:
                 if verbose:
                     start = time.time()
 
+                train_ops = [self.train_op]
+                if check_op is not None:
+                    train_ops.append(check_op)
+
                 for _ in range(_step, n_training_steps):
                     if profile:
-                        sess.run(self.train_op, {self.is_training_mode: True, self.data_loader_mode: 'train-pipe'}, options=tf.RunOptions(trace_level=tf.RunOptions.FULL_TRACE), run_metadata=run_metadata)
+                        sess.run(train_ops, {self.is_training_mode: True, self.data_loader_mode: 'train-pipe'}, options=tf.RunOptions(trace_level=tf.RunOptions.FULL_TRACE), run_metadata=run_metadata)
                     else:
-                        sess.run(self.train_op, {self.is_training_mode: True, self.data_loader_mode: 'train-pipe'})
+                        sess.run(train_ops, {self.is_training_mode: True, self.data_loader_mode: 'train-pipe'})
 
                     _step = int(sess.run(self._step_var))
 
