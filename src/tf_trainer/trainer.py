@@ -623,9 +623,9 @@ class Trainer:
 
         return self
 
-    def train(self, verbose=False, training_dir_path=None, profile=False, add_numeric_check=False):
+    def train(self, verbose=False, training_dir_path=None, profile=False, add_numeric_check=False, config_params=None):
         self._build_graph()
-
+        
         if training_dir_path is None:
             training_dir_path = self.hparams.get('training_dir_path', './training')
 
@@ -643,9 +643,17 @@ class Trainer:
 
         gpu_options = tf.GPUOptions(allow_growth=True,
                                     per_process_gpu_memory_fraction=gpu_memory_fraction)
-        config = tf.ConfigProto(allow_soft_placement=True,
-                                inter_op_parallelism_threads=os.cpu_count(),
-                                gpu_options=gpu_options)
+        
+        if not isinstance(config_params, dict):
+            config_params = dict()
+        
+        if 'allow_soft_placement' not in config_params:
+            config_params['allow_soft_placement'] = True
+            
+        if 'gpu_options' not in config_params:
+            config_params['gpu_options'] = gpu_options
+            
+        config = tf.ConfigProto(**config_params)
 
         if profile:
             run_metadata = tf.RunMetadata()
